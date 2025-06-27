@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use event_monitor::event;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 #[cfg(not(fuzzing))]
 use net_util::virtio_features_to_tap_offload;
 use net_util::{
@@ -315,9 +315,9 @@ impl NetEpollHandler {
 
         if res {
             self.signal_used_queue(self.queue_index_base)?;
-            debug!("Signalling RX queue");
+            trace!("Signalling RX queue");
         } else {
-            debug!("Not signalling RX queue");
+            trace!("Not signalling RX queue");
         }
         Ok(())
     }
@@ -725,8 +725,13 @@ impl Net {
 
         for fd in fds.iter() {
             // Keep the preserved original available across reboots.
-            let fd = fd.try_clone_to_owned().map_err(Error::DuplicateTapFd)?;
-            let tap = Tap::from_file(fd.into(), num_queue_pairs).map_err(Error::TapError)?;
+            let fd_duped = fd.try_clone_to_owned().map_err(Error::DuplicateTapFd)?;
+            debug!(
+                "dup'ed fd {} => {} for virtio-net device {id}",
+                fd.as_raw_fd(),
+                fd_duped.as_raw_fd()
+            );
+            let tap = Tap::from_file(fd_duped.into(), num_queue_pairs).map_err(Error::TapError)?;
             taps.push(tap);
         }
 
@@ -824,6 +829,23 @@ impl Net {
     #[cfg(fuzzing)]
     pub fn wait_for_epoll_threads(&mut self) {
         self.common.wait_for_epoll_threads();
+    }
+}
+
+impl Drop for Net {
+    fn drop(&mut self) {
+        // Get a comma-separated list of the interface names of the tap devices
+        // associated with this network device.
+        let ifnames_str = self
+            .taps
+            .iter()
+            .map(|tap| tap.if_name_as_str())
+            .collect::<Vec<_>>();
+        let ifnames_str = ifnames_str.join(",");
+        debug!(
+            "virtio-net device closed: id={}, ifnames=[{ifnames_str}]",
+            self.id
+        );
     }
 }
 
