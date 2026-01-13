@@ -43,12 +43,13 @@ use std::sync::mpsc::{RecvError, SendError, Sender, channel};
 use std::time::Duration;
 
 use block::mirror::{MirrorPhase, MirrorStatus};
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use micro_http::Body;
 use option_parser::{OptionParser, OptionParserError, Toggle, Tuple, TupleList};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vm_migration::MigratableError;
+use vm_migration::progress::MigrationProgress;
 use vm_migration::tls::{TlsConfigError, TlsEndpoint, validate_tls_dir};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -231,6 +232,10 @@ pub enum ApiError {
     /// Error triggering NMI
     #[error("Error triggering NMI")]
     VmNmi(#[source] VmError),
+
+    /// Error fetching the migration progress
+    #[error("Error fetching the migration progress")]
+    VmMigrationProgress(#[source] VmError),
 }
 pub type ApiResult<T> = Result<T, ApiError>;
 
@@ -969,6 +974,9 @@ pub enum ApiResponsePayload {
     /// Virtio-balloon statistics
     VmBalloonStats(Box<BalloonStatsResponse>),
 
+    /// The progress of a possibly ongoing live migration.
+    VmMigrationProgress(Box<Option<MigrationProgress>>),
+
     /// Vmm ping response
     VmmPing(VmmPingResponse),
 
@@ -1077,6 +1085,10 @@ pub trait RequestHandler {
     fn vm_cancel_migration(&mut self) -> Result<(), MigratableError>;
 
     fn vm_nmi(&mut self) -> Result<(), VmError>;
+
+    /// Returns the progress of the currently active migration or any previous
+    /// failed or canceled migration.
+    fn vm_migration_progress(&mut self) -> Option<MigrationProgress>;
 }
 
 /// It would be nice if we could pass around an object like this:
@@ -2469,6 +2481,45 @@ impl ApiAction for VmNmi {
         data: Self::RequestBody,
     ) -> ApiResult<Self::ResponseBody> {
         get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmMigrationProgress;
+
+impl ApiAction for VmMigrationProgress {
+    type RequestBody = ();
+    type ResponseBody = Box<Option<MigrationProgress>>;
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            trace!("API request event: VmMigrationProgress");
+
+            let snapshot = Ok(vmm.vm_migration_progress());
+            let response = snapshot
+                .map(Box::new)
+                .map(ApiResponsePayload::VmMigrationProgress)
+                .map_err(ApiError::VmMigrationProgress);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        let info = get_response(self, api_evt, api_sender, data)?;
+
+        match info {
+            ApiResponsePayload::VmMigrationProgress(info) => Ok(info),
+            _ => Err(ApiError::ResponsePayloadType),
+        }
     }
 }
 

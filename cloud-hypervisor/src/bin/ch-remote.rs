@@ -41,6 +41,9 @@ enum Error {
     #[cfg(feature = "dbus_api")]
     #[error("D-Bus API Client Error")]
     DBusApiClient(#[source] zbus::Error),
+    #[cfg(feature = "dbus_api")]
+    #[error("Command {0} is not supported over D-Bus")]
+    DBusUnsupportedCommand(&'static str),
     #[error("Error parsing CPU count")]
     InvalidCpuCount(#[source] num::ParseIntError),
     #[error("Error parsing memory size")]
@@ -381,6 +384,8 @@ fn rest_api_do_command(
         Command::Shutdown => {
             simple_api_command(socket, "PUT", "shutdown", None).map_err(Error::HttpApiClient)
         }
+        Command::MigrationProgress => simple_api_command(socket, "GET", "migration-progress", None)
+            .map_err(Error::HttpApiClient),
         Command::Nmi => {
             simple_api_command(socket, "PUT", "nmi", None).map_err(Error::HttpApiClient)
         }
@@ -666,6 +671,7 @@ fn dbus_api_do_command(
             let data = create_data(arg_path)?;
             proxy.api_vm_create(&data)
         }
+        Command::MigrationProgress => Err(Error::DBusUnsupportedCommand("migration-progress")),
     }
 }
 
@@ -1043,6 +1049,8 @@ enum Command {
     Delete,
     #[command(about = "Info on the VM")]
     Info,
+    #[command(about = "Query the progress of the current or last migration")]
+    MigrationProgress,
     #[command(about = "Trigger NMI")]
     Nmi,
     #[command(about = "Pause the VM")]
