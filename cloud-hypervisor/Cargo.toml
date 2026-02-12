@@ -35,6 +35,7 @@ seccompiler = { workspace = true }
 serde_json = { workspace = true }
 signal-hook = { workspace = true }
 thiserror = { workspace = true }
+vm-migration = { path = "../vm-migration" }
 vmm = { path = "../vmm" }
 vmm-sys-util = { workspace = true }
 zbus = { workspace = true, features = [

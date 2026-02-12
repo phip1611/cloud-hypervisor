@@ -497,6 +497,7 @@ dependencies = [
  "signal-hook",
  "test_infra",
  "thiserror",
+ "vm-migration",
  "vmm",
  "vmm-sys-util",
  "wait-timeout",

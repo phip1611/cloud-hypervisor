@@ -12,16 +12,19 @@ use std::marker::PhantomData;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 use std::{error, fs, iter, num, process};
 
 use api_client::{
-    Error as ApiClientError, simple_api_command, simple_api_command_with_fds,
-    simple_api_full_command,
+    Error as ApiClientError, StatusCode, simple_api_command, simple_api_command_with_fds,
+    simple_api_full_command, simple_api_full_command_with_fds_and_response,
 };
 use clap::{Parser, Subcommand};
-use log::error;
+use log::{error, info};
 use option_parser::{ByteSized, ByteSizedParseError};
 use thiserror::Error;
+use vm_migration::progress::{MigrationProgress, MigrationState};
 use vmm::api;
 use vmm::config::{self, RestoreConfig};
 use vmm::vm_config::{
@@ -519,11 +522,82 @@ fn rest_api_do_command(
         }
         Command::SendMigration {
             send_migration_config: arg_send_migration_config,
+            dispatch: just_dispatch,
         } => {
-            let send_migration_data =
+            let wait_for_migration = !just_dispatch;
+
+            let mut send_migration_data =
                 send_migration_data(arg_send_migration_config.as_ref().unwrap())?;
+            let shutdown_after_migration =
+                !send_migration_data.keep_alive && !send_migration_data.preserve_source;
+            if wait_for_migration {
+                // Keep the API available until the final progress snapshot is observed.
+                send_migration_data.keep_alive = true;
+            }
+            let send_migration_data = serde_json::to_string(&send_migration_data).unwrap();
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
-                .map_err(Error::HttpApiClient)
+                .map_err(Error::HttpApiClient)?;
+
+            if !wait_for_migration {
+                return Ok(());
+            }
+            loop {
+                let response = simple_api_full_command_with_fds_and_response(
+                    socket,
+                    "GET",
+                    "vm.migration-progress",
+                    None,
+                    &[],
+                )
+                .map_err(Error::HttpApiClient)?
+                // should have response
+                .ok_or(Error::HttpApiClient(ApiClientError::ServerResponse(
+                    StatusCode::Ok,
+                    None,
+                )))?;
+
+                // This is guaranteed by the SendMigration call
+                assert_ne!(
+                    response, "null",
+                    "migration progress should be there immediately when the migration was dispatched"
+                );
+
+                let progress = serde_json::from_slice::<MigrationProgress>(response.as_bytes())
+                    .map_err(|e| {
+                        error!("failed to parse response as MigrationProgress: {e}");
+                        Error::HttpApiClient(ApiClientError::ServerResponse(
+                            StatusCode::Ok,
+                            Some(response),
+                        ))
+                    })?;
+
+                match progress.state {
+                    MigrationState::Cancelled { .. } => {
+                        info!("Migration was cancelled");
+                        break;
+                    }
+                    MigrationState::Failed {
+                        error_msg,
+                        error_msg_debug,
+                    } => {
+                        error!("Migration failed! {error_msg}\n{error_msg_debug}");
+                        break;
+                    }
+                    MigrationState::Finished { .. } => {
+                        info!("Migration finished successfully");
+                        if shutdown_after_migration {
+                            simple_api_full_command(socket, "PUT", "vmm.shutdown", None)
+                                .map_err(Error::HttpApiClient)?;
+                        }
+                        break;
+                    }
+                    MigrationState::Ongoing { .. } => {
+                        sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                }
+            }
+            Ok(())
         }
         Command::ReceiveMigration { .. } => simple_api_command_with_fds(
             socket,
@@ -659,10 +733,11 @@ fn dbus_api_do_command(
         Command::CancelMigration => proxy.api_vm_cancel_migration(),
         Command::SendMigration {
             send_migration_config: arg_send_migration_config,
+            ..
         } => {
             let send_migration_data =
                 send_migration_data(arg_send_migration_config.as_ref().unwrap())?;
-            proxy.api_vm_send_migration(&send_migration_data)
+            proxy.api_vm_send_migration(&serde_json::to_string(&send_migration_data).unwrap())
         }
         Command::ReceiveMigration { .. } => {
             proxy.api_vm_receive_migration(fd_request_body.as_deref().unwrap())
@@ -893,11 +968,8 @@ fn receive_migration_data(config: &str) -> Result<FdCommand, Error> {
     Ok((serde_json::to_string(&data).unwrap(), fds))
 }
 
-fn send_migration_data(config: &str) -> Result<String, Error> {
-    let send_migration_data =
-        api::VmSendMigrationData::parse(config).map_err(Error::SendMigrationConfig)?;
-    let send_migration_config = serde_json::to_string(&send_migration_data).unwrap();
-    Ok(send_migration_config)
+fn send_migration_data(config: &str) -> Result<api::VmSendMigrationData, Error> {
+    api::VmSendMigrationData::parse(config).map_err(Error::SendMigrationConfig)
 }
 
 fn create_data(path: &str) -> Result<String, Error> {
@@ -1125,6 +1197,11 @@ enum Command {
     Resume,
     #[command(about = "Initiate a VM migration")]
     SendMigration {
+        #[arg(
+            long,
+            help = "Just dispatch the migration without waiting for it to finish"
+        )]
+        dispatch: bool,
         #[arg(
             value_name = "send_migration_config",
             index = 1,
