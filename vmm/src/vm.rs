@@ -556,6 +556,13 @@ pub struct Vm {
     numa_nodes: NumaNodes,
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    post_migration_lifecycle_event: Option<PostponedLifecycleEvent>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PostponedLifecycleEvent {
+    VmReboot,
+    VmShutdown,
 }
 
 impl Drop for Vm {
@@ -720,6 +727,15 @@ impl Vm {
         } else {
             VmState::Created
         };
+        let post_migration_lifecycle_event = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                get_vm_snapshot(snapshot)
+                    .map(|vm_snapshot| vm_snapshot.post_migration_lifecycle_event)
+                    .map_err(Error::Restore)
+            })
+            .transpose()?
+            .flatten();
 
         Ok(Vm {
             initramfs,
@@ -735,6 +751,7 @@ impl Vm {
             numa_nodes,
             stop_on_boot,
             load_payload_handle,
+            post_migration_lifecycle_event,
         })
     }
 
@@ -1403,6 +1420,17 @@ impl Vm {
         }
 
         Ok(numa_nodes)
+    }
+
+    /// Stores a lifecycle event until migration and active disk mirrors permit
+    /// it to be replayed.
+    pub fn set_post_migration_lifecycle_event(&mut self, event: Option<PostponedLifecycleEvent>) {
+        self.post_migration_lifecycle_event = event;
+    }
+
+    /// Returns the lifecycle event currently waiting to be replayed.
+    pub fn post_migration_lifecycle_event(&self) -> Option<PostponedLifecycleEvent> {
+        self.post_migration_lifecycle_event
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -3145,6 +3173,8 @@ impl Pausable for Vm {
 
 #[derive(Serialize, Deserialize)]
 pub struct VmSnapshot {
+    #[serde(default)]
+    pub post_migration_lifecycle_event: Option<PostponedLifecycleEvent>,
     #[cfg_attr(target_arch = "x86_64", serde(flatten))]
     #[cfg_attr(
         not(target_arch = "x86_64"),
@@ -3183,6 +3213,7 @@ impl Snapshottable for Vm {
         let common_cpuid = self.cpu_manager.lock().unwrap().common_cpuid();
 
         let vm_snapshot_state = VmSnapshot {
+            post_migration_lifecycle_event: self.post_migration_lifecycle_event(),
             clock: self.saved_clock.map(|saved| saved.state),
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             common_cpuid,
