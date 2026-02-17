@@ -1575,6 +1575,7 @@ impl Vmm {
         ctx: &mut MemoryMigrationContext,
         is_converged: impl Fn(&MemoryMigrationContext) -> result::Result<bool, MigratableError>,
         mem_send: &mut SendAdditionalConnections,
+        postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
         cancel_migration: &AtomicBool,
     ) -> result::Result<MemoryRangeTable /* remaining */, MigratableError> {
         loop {
@@ -1613,6 +1614,16 @@ impl Vmm {
             // Increment iteration last: This way we ensure that the logging
             // above matches the actual iteration.
             ctx.iteration += 1;
+
+            let event = *postponed_lifecycle_event.lock().unwrap();
+            if let Some(event) = event {
+                info!(
+                    "Lifecycle event postponed during migration ({event:?}), switching to downtime phase early"
+                );
+                // The current iteration has already been sent, therefore no extra range
+                // needs to be carried into the final transfer batch.
+                break Ok(MemoryRangeTable::default());
+            }
         }
     }
 
@@ -1722,6 +1733,7 @@ impl Vmm {
         send_data_migration: &VmSendMigrationData,
         mem_send: &mut SendAdditionalConnections,
         ctx: &mut OngoingMigrationContext,
+        postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
         cancel_migration: &AtomicBool,
     ) -> result::Result<(), MigratableError> {
         let mut mem_ctx = MemoryMigrationContext::new();
@@ -1734,6 +1746,7 @@ impl Vmm {
             // We bind send_data_migration to the callback
             |ctx| Self::is_precopy_converged(ctx, send_data_migration),
             mem_send,
+            postponed_lifecycle_event,
             cancel_migration,
         )?;
         let downtime_begin = Instant::now();
@@ -1857,6 +1870,7 @@ impl Vmm {
                     send_data_migration,
                     &mut mem_send,
                     &mut ctx,
+                    postponed_lifecycle_event,
                     cancel_migration,
                 )
                 .inspect_err(|_| {
