@@ -45,6 +45,7 @@ pub struct AcpiShutdownDevice {
     guest_exit_evt: EventFd,
     reset_evt: EventFd,
     vcpus_kill_signalled: Arc<AtomicBool>,
+    vcpus_pause_signalled: Arc<AtomicBool>,
 }
 
 impl AcpiShutdownDevice {
@@ -53,11 +54,13 @@ impl AcpiShutdownDevice {
         guest_exit_evt: EventFd,
         reset_evt: EventFd,
         vcpus_kill_signalled: Arc<AtomicBool>,
+        vcpus_pause_signalled: Arc<AtomicBool>,
     ) -> AcpiShutdownDevice {
         AcpiShutdownDevice {
             guest_exit_evt,
             reset_evt,
             vcpus_kill_signalled,
+            vcpus_pause_signalled,
         }
     }
 }
@@ -88,7 +91,9 @@ impl BusDevice for AcpiShutdownDevice {
             }
             // Spin until we are sure the reset_evt has been handled and that when
             // we return from the KVM_RUN we will exit rather than re-enter the guest.
-            while !self.vcpus_kill_signalled.load(Ordering::SeqCst) {
+            while !self.vcpus_kill_signalled.load(Ordering::SeqCst)
+                && !self.vcpus_pause_signalled.load(Ordering::SeqCst)
+            {
                 // This is more effective than thread::yield_now() at
                 // avoiding a priority inversion with the VMM thread
                 thread::sleep(Duration::from_millis(1));
@@ -105,7 +110,9 @@ impl BusDevice for AcpiShutdownDevice {
             }
             // Spin until we are sure the reset_evt has been handled and that when
             // we return from the KVM_RUN we will exit rather than re-enter the guest.
-            while !self.vcpus_kill_signalled.load(Ordering::SeqCst) {
+            while !self.vcpus_kill_signalled.load(Ordering::SeqCst)
+                && !self.vcpus_pause_signalled.load(Ordering::SeqCst)
+            {
                 // This is more effective than thread::yield_now() at
                 // avoiding a priority inversion with the VMM thread
                 thread::sleep(Duration::from_millis(1));
