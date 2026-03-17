@@ -13,7 +13,7 @@ serde = { workspace = true, features = ["derive", "rc", "std"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 vm-memory = { workspace = true }
-zerocopy = { workspace = true, features = ["alloc", "derive"] }
+zerocopy = { workspace = true, features = ["alloc", "derive", "std"] }
 
 [lints]
 workspace = true
