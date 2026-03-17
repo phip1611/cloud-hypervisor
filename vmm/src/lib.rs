@@ -1163,7 +1163,7 @@ impl Vmm {
     ) -> result::Result<(), MigratableError> {
         event!("vm", "migration-receive-ready");
         // Accept the connection and get the socket
-        let mut socket = listener.accept()?;
+        let mut socket = listener.accept(true)?;
         // The sender sends its first request right after connecting. Without
         // a timeout, a peer that stays silent blocks the receiver forever.
         socket
