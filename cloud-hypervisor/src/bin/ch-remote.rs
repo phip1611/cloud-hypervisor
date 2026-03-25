@@ -122,6 +122,7 @@ trait DBusApi1 {
     fn vm_receive_migration(&self, receive_migration_data: &str) -> zbus::Result<()>;
     fn vm_send_migration(&self, receive_migration_data: &str) -> zbus::Result<()>;
     fn vm_resume(&self) -> zbus::Result<()>;
+    fn vm_post_migration_announce(&self) -> zbus::Result<()>;
     fn vm_shutdown(&self) -> zbus::Result<()>;
     fn vm_snapshot(&self, vm_snapshot_config: &str) -> zbus::Result<()>;
 }
@@ -288,6 +289,11 @@ impl<'a> DBusApi1ProxyBlocking<'a> {
         self.vm_resume().map_err(Error::DBusApiClient)
     }
 
+    fn api_vm_post_migration_announce(&self) -> ApiResult {
+        self.vm_post_migration_announce()
+            .map_err(Error::DBusApiClient)
+    }
+
     fn api_vm_shutdown(&self) -> ApiResult {
         self.vm_shutdown().map_err(Error::DBusApiClient)
     }
@@ -346,6 +352,10 @@ fn rest_api_do_command(
             .map_err(Error::HttpApiClient),
         Command::Resume => {
             simple_api_command(socket, "PUT", "resume", None).map_err(Error::HttpApiClient)
+        }
+        Command::PostMigrationAnnounce => {
+            simple_api_command(socket, "PUT", "post-migration-announce", None)
+                .map_err(Error::HttpApiClient)
         }
         Command::PowerButton => {
             simple_api_command(socket, "PUT", "power-button", None).map_err(Error::HttpApiClient)
@@ -541,6 +551,7 @@ fn dbus_api_do_command(
         Command::Delete => proxy.api_vm_delete(),
         Command::ShutdownVmm => proxy.api_vmm_shutdown(),
         Command::Resume => proxy.api_vm_resume(),
+        Command::PostMigrationAnnounce => proxy.api_vm_post_migration_announce(),
         Command::PowerButton => proxy.api_vm_power_button(),
         Command::Reboot => proxy.api_vm_reboot(),
         Command::Pause => proxy.api_vm_pause(),
@@ -1038,6 +1049,8 @@ enum Command {
     Pause,
     #[command(about = "Ping the VMM to check for API server availability")]
     Ping,
+    #[command(about = "Announce completion of VM migration")]
+    PostMigrationAnnounce,
     #[command(about = "Trigger a power button in the VM")]
     PowerButton,
     #[command(about = "Reboot the VM")]

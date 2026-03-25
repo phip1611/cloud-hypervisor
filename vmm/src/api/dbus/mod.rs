@@ -22,9 +22,9 @@ use crate::api::VmCoredump;
 use crate::api::{
     AddDisk, Body, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet, VmAddPmem,
     VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBalloonStats, VmBoot, VmCancelMigration, VmCounters,
-    VmCreate, VmDelete, VmInfo, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration,
-    VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration,
-    VmShutdown, VmSnapshot, VmmPing, VmmShutdown,
+    VmCreate, VmDelete, VmInfo, VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton, VmReboot,
+    VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume,
+    VmSendMigration, VmShutdown, VmSnapshot, VmmPing, VmmShutdown,
 };
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
 use crate::{Error as VmmError, NetConfig, Result as VmmResult, VmConfig};
@@ -314,6 +314,12 @@ impl DBusApi {
 
     async fn vm_resume(&self) -> Result<()> {
         self.vm_action(&VmResume, ()).await.map(|_| ())
+    }
+
+    async fn vm_post_migration_announce(&self) -> Result<()> {
+        self.vm_action(&VmPostMigrationAnnounce, ())
+            .await
+            .map(|_| ())
     }
 
     async fn vm_shutdown(&self) -> Result<()> {
