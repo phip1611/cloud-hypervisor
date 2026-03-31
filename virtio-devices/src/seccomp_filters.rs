@@ -171,7 +171,10 @@ fn create_virtio_net_ctl_ioctl_seccomp_rule() -> Vec<SeccompRule> {
 }
 
 fn virtio_net_ctl_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
-    vec![(libc::SYS_ioctl, create_virtio_net_ctl_ioctl_seccomp_rule())]
+    vec![
+        (libc::SYS_ioctl, create_virtio_net_ctl_ioctl_seccomp_rule()),
+        (libc::SYS_timerfd_settime, vec![]),
+    ]
 }
 
 fn virtio_pmem_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
@@ -220,7 +223,7 @@ fn virtio_generic_vhost_user_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
 }
 
 fn virtio_vhost_net_ctl_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
-    vec![]
+    vec![(libc::SYS_timerfd_settime, vec![])]
 }
 
 fn virtio_vhost_net_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {

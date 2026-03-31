@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use vmm_sys_util::errno::Error as ErrnoError;
 
 #[macro_use]
 mod device;
@@ -106,6 +107,8 @@ const VIRTIO_F_NOTIFICATION_DATA: u32 = 38;
 pub enum ActivateError {
     #[error("Failed to activate virtio device")]
     BadActivate,
+    #[error("Failed to clone EventFd")]
+    CloneEventFd(#[source] std::io::Error),
     #[error("Failed to clone exit event fd")]
     CloneExitEventFd(#[source] std::io::Error),
     #[error("Failed to spawn thread")]
@@ -120,6 +123,8 @@ pub enum ActivateError {
     CreateRateLimiter(#[source] std::io::Error),
     #[error("Failed to activate the vDPA device")]
     ActivateVdpa(#[source] vdpa::Error),
+    #[error("Failed to create TimerFd")]
+    CreateTimerFd(#[source] ErrnoError),
 }
 
 pub type ActivateResult = std::result::Result<(), ActivateError>;
