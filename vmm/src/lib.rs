@@ -1403,7 +1403,7 @@ impl Vmm {
             vm.stop_dirty_log()?;
         }
 
-        info!("Migration complete");
+        info!("Migration complete: {}ms since downtime begin", vm.pause_downtime().expect("VM should be paused at this time").as_millis());
 
         // Let every Migratable object know about the migration being complete
         vm.complete_migration()

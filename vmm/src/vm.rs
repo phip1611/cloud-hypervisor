@@ -22,6 +22,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
+use std::time::Duration;
 use std::{cmp, result, str, thread};
 
 use anyhow::anyhow;
@@ -47,6 +48,7 @@ use gdbstub_arch::x86::reg::X86_64CoreRegs as CoreRegs;
 #[cfg(target_arch = "aarch64")]
 use hypervisor::arch::aarch64::regs::AARCH64_PMU_IRQ;
 use hypervisor::{HypervisorVmConfig, HypervisorVmError, VmOps};
+use jiff::Zoned;
 use libc::{SIGWINCH, termios};
 use linux_loader::cmdline::Cmdline;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
@@ -523,6 +525,7 @@ pub struct Vm {
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    pause_time: Option<Zoned>,
 }
 
 impl Vm {
@@ -658,6 +661,13 @@ impl Vm {
             None
         };
 
+        let pause_time = if let Some(snapshot) = snapshot.as_ref() {
+            let vm_snapshot = get_vm_snapshot(snapshot).map_err(Error::Restore)?;
+            vm_snapshot.pause_time
+        } else {
+            None
+        };
+
         let state = if snapshot.is_some() {
             VmState::Paused
         } else {
@@ -683,7 +693,16 @@ impl Vm {
             hypervisor,
             stop_on_boot,
             load_payload_handle,
+            pause_time,
         })
+    }
+
+    pub(crate) fn pause_downtime(&self) -> Option<Duration> {
+        let Some(ref pause_time) = self.pause_time else {
+            return None;
+        };
+
+        std::time::SystemTime::from(pause_time).elapsed().ok()
     }
 
     /// Determine if IOMMU should be forced based on confidential computing features.
@@ -3065,6 +3084,7 @@ impl Pausable for Vm {
             .pause()
             .map_err(|e| MigratableError::Pause(anyhow!("Could not pause the VM: {e}")))?;
 
+        self.pause_time = Some(Zoned::now());
         self.state = new_state;
 
         event!("vm", "paused");
@@ -3100,8 +3120,11 @@ impl Pausable for Vm {
         self.device_manager.lock().unwrap().resume()?;
         self.cpu_manager.lock().unwrap().resume()?;
 
+        info!("VM resumed after a downtime of {}ms", self.pause_downtime().expect("VM should have been paused before").as_millis());
+
         // And we're back to the Running state.
         self.state = new_state;
+        self.pause_time = None;
         event!("vm", "resumed");
         Ok(())
     }
@@ -3113,6 +3136,7 @@ pub struct VmSnapshot {
     pub clock: Option<hypervisor::ClockData>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     pub common_cpuid: Vec<hypervisor::arch::x86::CpuIdEntry>,
+    pub pause_time: Option<Zoned>,
 }
 
 pub const VM_SNAPSHOT_ID: &str = "vm";
@@ -3166,6 +3190,7 @@ impl Snapshottable for Vm {
             clock: self.saved_clock,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             common_cpuid,
+            pause_time: self.pause_time.clone(),
         };
 
         let mut vm_snapshot = Snapshot::new_from_state(&vm_snapshot_state)?;
@@ -3493,6 +3518,26 @@ mod unit_tests {
     #[test]
     fn test_vm_paused_transitions() {
         test_vm_state_transitions(VmState::Paused);
+    }
+
+    #[test]
+    fn test_vm_snapshot_pause_time_roundtrip() {
+        let snapshot = VmSnapshot {
+            #[cfg(target_arch = "x86_64")]
+            clock: None,
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            common_cpuid: Vec::new(),
+            pause_time: Some(
+                "2024-10-31T16:33:53.123456789+00:00[UTC]"
+                    .parse::<Zoned>()
+                    .unwrap(),
+            ),
+        };
+
+        let serialized = serde_json::to_vec(&snapshot).unwrap();
+        let restored: VmSnapshot = serde_json::from_slice(&serialized).unwrap();
+
+        assert_eq!(restored.pause_time, snapshot.pause_time);
     }
 
     #[cfg(feature = "tdx")]
