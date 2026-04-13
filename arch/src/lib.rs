@@ -93,6 +93,10 @@ impl FromStr for CpuProfileConfig {
                     Err(ParseCpuProfileError::UnsupportedArchitecture)
                 }
             }
+            // Built-in CPU profiles are selected by their kebab-case name.
+            #[cfg(target_arch = "x86_64")]
+            None => Self::from_builtin_name(&s.to_lowercase())
+                .ok_or_else(|| ParseCpuProfileError::InvalidValue(s.to_owned())),
             _ => Err(ParseCpuProfileError::InvalidValue(s.to_owned())),
         }
     }

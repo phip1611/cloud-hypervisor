@@ -17,6 +17,7 @@ libc = { workspace = true }
 linux-loader = { workspace = true, features = ["elf"] }
 log = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc", "std"] }
+# We currently use this for (de-)serializing CPU profile data
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
@@ -38,6 +39,9 @@ crc-any = { workspace = true, features = ["std"] }
 [target.'cfg(any(target_arch = "aarch64", target_arch = "riscv64"))'.dependencies]
 fdt_parser = { version = "0.1.5", package = "fdt" }
 vm-fdt = { workspace = true, features = ["std"] }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+flate2 = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

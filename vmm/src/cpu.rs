@@ -997,6 +997,7 @@ impl CpuManager {
             arch::CpuProfileConfig::File(path) => {
                 Some(CpuProfile::from_file(path).map_err(Error::LoadCpuProfile)?)
             }
+            builtin => CpuProfile::builtin(builtin),
         };
 
         #[cfg(target_arch = "x86_64")]
