@@ -20,6 +20,7 @@ use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::net::UnixStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "riscv64"))]
@@ -34,6 +35,7 @@ use arch::layout::{KVM_IDENTITY_MAP_START, KVM_TSS_START};
 #[cfg(not(target_arch = "x86_64"))]
 use arch::uefi;
 use arch::{EntryPoint, NumaNode, NumaNodes, get_host_cpu_phys_bits, layout};
+use block::mirror::MirrorStatus;
 use devices::AcpiNotificationFlags;
 #[cfg(feature = "fw_cfg")]
 use devices::legacy::fw_cfg::{FwCfgContent, FwCfgInitParams, FwCfgItem};
@@ -253,6 +255,21 @@ pub enum Error {
 
     #[error("Failed resizing a disk image")]
     ResizeDisk,
+
+    #[error("Failed to start disk mirror")]
+    DiskMirrorStart,
+
+    #[error("Failed to read disk mirror state")]
+    DiskMirrorStatus,
+
+    #[error("Failed to complete disk mirror")]
+    DiskMirrorComplete,
+
+    #[error("Failed to cancel disk mirror")]
+    DiskMirrorCancel,
+
+    #[error("At least one disk mirror is active")]
+    ActiveBlockMirror,
 
     #[error("Cannot activate virtio devices")]
     ActivateVirtioDevices(#[source] DeviceManagerError),
@@ -3007,6 +3024,57 @@ impl Vm {
 
     pub fn cpu_manager(&self) -> &Arc<Mutex<cpu::CpuManager>> {
         &self.cpu_manager
+    }
+
+    pub fn mirror_disk(&self, id: &str, dest_path: &Path) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk(id, dest_path)
+            .map_err(Error::DeviceManager)?;
+
+        Ok(())
+    }
+
+    /// Returns the current mirror status for `id`.
+    pub fn mirror_disk_status(&self, id: &str) -> Result<MirrorStatus> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_status(id)
+            .map_err(Error::DeviceManager)
+    }
+
+    /// Completes the mirror for `id` and switches to its destination.
+    pub fn mirror_disk_complete(&self, id: &str) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_complete(id)
+            .map_err(Error::DeviceManager)?;
+        Ok(())
+    }
+
+    /// Cancels the mirror for `id` and keeps its source backend.
+    pub fn mirror_disk_cancel(&self, id: &str) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_cancel(id)
+            .map_err(Error::DeviceManager)
+    }
+
+    /// Returns true if there is an active mirror in any of the block devices, false otherwise.
+    pub fn any_active_block_mirrors(&self) -> bool {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .any_active_block_mirrors()
+    }
+
+    /// Cancels every active block mirror. Failures are logged and ignored.
+    pub fn cancel_block_mirrors(&self) {
+        self.device_manager.lock().unwrap().cancel_block_mirrors();
     }
 
     pub fn device_manager(&self) -> &Arc<Mutex<DeviceManager>> {
