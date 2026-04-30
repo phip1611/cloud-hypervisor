@@ -18,6 +18,8 @@ use std::mem::offset_of;
 use std::num;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::io::AsRawFd;
+#[cfg(feature = "kvm")]
+use std::os::unix::io::RawFd;
 #[cfg(feature = "sev_snp")]
 use std::process;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
@@ -3348,6 +3350,11 @@ impl cpu::Vcpu for KvmVcpu {
     /// Set the "immediate_exit" state
     fn set_immediate_exit(&mut self, exit: bool) {
         self.fd.set_kvm_immediate_exit(exit.into());
+    }
+
+    #[cfg(feature = "kvm")]
+    unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 
     #[cfg(target_arch = "x86_64")]
