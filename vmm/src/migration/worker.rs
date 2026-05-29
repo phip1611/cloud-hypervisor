@@ -120,6 +120,7 @@ pub struct MigrationWorker {
     /// Configuration of the migration.
     config: VmSendMigrationData,
     seccomp_filter: BpfProgram,
+    tcp_worker_seccomp_filter: BpfProgram,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     /// The initial VM state (paused or running).
@@ -147,6 +148,7 @@ impl MigrationWorker {
             self.hypervisor.as_ref(),
             &self.config,
             self.initial_vm_state,
+            &self.tcp_worker_seccomp_filter,
         )?;
 
         event!("vm", "migration-finished");
@@ -206,6 +208,7 @@ impl MigrationWorker {
         check_migration_evt: EventFd,
         config: VmSendMigrationData,
         seccomp_filter: BpfProgram,
+        tcp_worker_seccomp_filter: BpfProgram,
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))] hypervisor: Arc<
             dyn hypervisor::Hypervisor,
         >,
@@ -217,6 +220,7 @@ impl MigrationWorker {
             check_migration_evt,
             config,
             seccomp_filter,
+            tcp_worker_seccomp_filter,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             hypervisor,
             initial_vm_state,
