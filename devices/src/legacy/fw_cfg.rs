@@ -113,7 +113,9 @@ pub enum FwCfgContent {
     Bytes(Vec<u8>),
     Slice(&'static [u8]),
     File(u64, File),
+    U64(u64),
     U32(u32),
+    U16(u16),
 }
 
 impl Default for FwCfgContent {
@@ -133,7 +135,9 @@ impl FwCfgContent {
                     .ok_or(ErrorKind::InvalidData)? as usize
             }
             FwCfgContent::Slice(s) => s.len(),
+            FwCfgContent::U64(n) => size_of_val(n),
             FwCfgContent::U32(n) => size_of_val(n),
+            FwCfgContent::U16(n) => size_of_val(n),
         };
         u32::try_from(ret).map_err(|_| ErrorKind::InvalidInput.into())
     }
@@ -695,7 +699,19 @@ impl FwCfg {
             FwCfgContent::File(o, f) => {
                 f.read_exact_at(data, o + offset as u64)?;
             }
+            FwCfgContent::U64(n) => {
+                let bytes = n.to_le_bytes();
+                if end <= bytes.len() {
+                    data.copy_from_slice(&bytes[start..end]);
+                }
+            }
             FwCfgContent::U32(n) => {
+                let bytes = n.to_le_bytes();
+                if end <= bytes.len() {
+                    data.copy_from_slice(&bytes[start..end]);
+                }
+            }
+            FwCfgContent::U16(n) => {
                 let bytes = n.to_le_bytes();
                 if end <= bytes.len() {
                     data.copy_from_slice(&bytes[start..end]);
