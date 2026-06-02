@@ -22,7 +22,7 @@ use virtio_queue::desc::RawDescriptor;
 use virtio_queue::{Queue, QueueT};
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 use vm_virtio::{AccessPlatform, Translatable};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -477,17 +477,17 @@ impl VirtioDevice for Vdpa {
 }
 
 impl Pausable for Vdpa {
-    fn pause(&mut self) -> std::result::Result<(), MigratableError> {
+    fn pause(&mut self) -> std::result::Result<(), PausableError> {
         if self.migrating {
             Ok(())
         } else {
-            Err(MigratableError::Pause(anyhow!(
-                "Can't pause a vDPA device outside live migration"
-            )))
+            Err(PausableError::Pause(
+                "Can't pause a vDPA device outside live migration".to_owned(),
+            ))
         }
     }
 
-    fn resume(&mut self) -> std::result::Result<(), MigratableError> {
+    fn resume(&mut self) -> std::result::Result<(), PausableError> {
         if !self.common.paused.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -495,9 +495,9 @@ impl Pausable for Vdpa {
         if self.migrating {
             Ok(())
         } else {
-            Err(MigratableError::Resume(anyhow!(
-                "Can't resume a vDPA device outside live migration"
-            )))
+            Err(PausableError::Resume(
+                "Can't resume a vDPA device outside live migration".to_owned(),
+            ))
         }
     }
 }

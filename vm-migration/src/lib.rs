@@ -50,12 +50,31 @@ pub enum UffdError {
 }
 
 #[derive(Error, Debug)]
-pub enum MigratableError {
-    #[error("Failed to pause migratable component")]
-    Pause(#[source] anyhow::Error),
+pub enum PausableError {
+    #[error("Failed to pause migratable component: {0}")]
+    Pause(String),
 
-    #[error("Failed to resume migratable component")]
-    Resume(#[source] anyhow::Error),
+    #[error("Failed to resume migratable component: {0}")]
+    Resume(String),
+
+    #[error("Lifecycle operation skipped for disconnected component {0}")]
+    DeviceDisconnected(String),
+}
+
+impl PausableError {
+    pub fn pause(source: impl std::fmt::Display) -> Self {
+        Self::Pause(source.to_string())
+    }
+
+    pub fn resume(source: impl std::fmt::Display) -> Self {
+        Self::Resume(source.to_string())
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum MigratableError {
+    #[error(transparent)]
+    Pausable(#[from] PausableError),
 
     #[error("Failed to snapshot migratable component")]
     Snapshot(#[source] anyhow::Error),
@@ -93,19 +112,17 @@ pub enum MigratableError {
     #[error("Failed to release a disk lock")]
     UnlockError(#[source] anyhow::Error),
 
-    #[error("Lifecycle operation skipped for disconnected component {0}")]
-    DeviceDisconnected(String),
 }
 
 /// A Pausable component can be paused and resumed.
 pub trait Pausable {
     /// Pause the component.
-    fn pause(&mut self) -> std::result::Result<(), MigratableError> {
+    fn pause(&mut self) -> std::result::Result<(), PausableError> {
         Ok(())
     }
 
     /// Resume the component.
-    fn resume(&mut self) -> std::result::Result<(), MigratableError> {
+    fn resume(&mut self) -> std::result::Result<(), PausableError> {
         Ok(())
     }
 }

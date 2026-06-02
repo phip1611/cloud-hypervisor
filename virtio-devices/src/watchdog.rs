@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use virtio_queue::{Queue, QueueT};
 use vm_memory::{Bytes, GuestAddressSpace, GuestMemoryAtomic};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 use vm_virtio::checked_descriptor::DescriptorChainExt;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -393,20 +393,20 @@ impl VirtioDevice for Watchdog {
 }
 
 impl Pausable for Watchdog {
-    fn pause(&mut self) -> result::Result<(), MigratableError> {
+    fn pause(&mut self) -> result::Result<(), PausableError> {
         info!("Watchdog paused - disabling timer");
         timerfd_setup(&self.timer, 0)
-            .map_err(|e| MigratableError::Pause(anyhow!("Error clearing timer: {e:?}")))?;
+            .map_err(|e| PausableError::Pause(format!("Error clearing timer: {e:?}")))?;
         self.common.pause()
     }
 
-    fn resume(&mut self) -> result::Result<(), MigratableError> {
+    fn resume(&mut self) -> result::Result<(), PausableError> {
         // Reset the timer on pause if it was previously used
         if self.last_ping_time.lock().unwrap().is_some() {
             info!("Watchdog resumed - enabling timer (every {WATCHDOG_TIMER_INTERVAL} seconds)");
             self.last_ping_time.lock().unwrap().replace(Instant::now());
             timerfd_setup(&self.timer, WATCHDOG_TIMER_INTERVAL)
-                .map_err(|e| MigratableError::Resume(anyhow!("Error setting timer: {e:?}")))?;
+                .map_err(|e| PausableError::Resume(format!("Error setting timer: {e:?}")))?;
         }
         self.common.resume()
     }

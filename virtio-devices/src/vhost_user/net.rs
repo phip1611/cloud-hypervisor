@@ -20,7 +20,7 @@ use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use virtio_queue::QueueT;
 use vm_memory::{ByteValued, GuestMemoryAtomic};
 use vm_migration::protocol::MemoryRangeTable;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::seccomp_filters::Thread;
@@ -390,12 +390,12 @@ impl VirtioDevice for Net {
 }
 
 impl Pausable for Net {
-    fn pause(&mut self) -> result::Result<(), MigratableError> {
+    fn pause(&mut self) -> result::Result<(), PausableError> {
         self.vu_common.pause()?;
         self.vu_common.virtio_common.pause()
     }
 
-    fn resume(&mut self) -> result::Result<(), MigratableError> {
+    fn resume(&mut self) -> result::Result<(), PausableError> {
         self.vu_common.virtio_common.resume()?;
 
         if let Some(epoll_thread) = &self.vu_common.epoll_thread {

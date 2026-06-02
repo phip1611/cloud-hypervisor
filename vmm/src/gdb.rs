@@ -42,9 +42,9 @@ pub enum DebuggableError {
     #[error("Setting debug failed")]
     SetDebug(#[source] hypervisor::HypervisorCpuError),
     #[error("Pausing failed")]
-    Pause(#[source] vm_migration::MigratableError),
+    Pause(#[source] vm_migration::PausableError),
     #[error("Resuming failed")]
-    Resume(#[source] vm_migration::MigratableError),
+    Resume(#[source] vm_migration::PausableError),
     #[error("Reading registers failed")]
     ReadRegs(#[source] crate::cpu::Error),
     #[error("Writing registers failed")]

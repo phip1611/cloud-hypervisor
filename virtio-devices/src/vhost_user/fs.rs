@@ -15,7 +15,7 @@ use vhost::vhost_user::{FrontendReqHandler, VhostUserFrontend, VhostUserFrontend
 use vm_device::UserspaceMapping;
 use vm_memory::{ByteValued, GuestMemoryAtomic};
 use vm_migration::protocol::MemoryRangeTable;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 use super::vu_common_ctrl::VhostUserHandle;
@@ -335,12 +335,12 @@ impl VirtioDevice for Fs {
 }
 
 impl Pausable for Fs {
-    fn pause(&mut self) -> result::Result<(), MigratableError> {
+    fn pause(&mut self) -> result::Result<(), PausableError> {
         self.vu_common.pause()?;
         self.vu_common.virtio_common.pause()
     }
 
-    fn resume(&mut self) -> result::Result<(), MigratableError> {
+    fn resume(&mut self) -> result::Result<(), PausableError> {
         self.vu_common.virtio_common.resume()?;
 
         if let Some(epoll_thread) = &self.vu_common.epoll_thread {

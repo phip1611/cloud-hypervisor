@@ -41,7 +41,7 @@ use virtio_bindings::virtio_config::*;
 use virtio_bindings::virtio_ring::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use virtio_queue::{Queue, QueueOwnedT, QueueT};
 use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryError};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 use vm_virtio::AccessPlatform;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -106,9 +106,9 @@ pub enum Error {
     #[error("Disk image size is not a multiple of {}", SECTOR_SIZE)]
     InvalidSize,
     #[error("Failed to pause vcpus")]
-    PauseVcpus(#[source] MigratableError),
+    PauseVcpus(#[source] PausableError),
     #[error("Failed to resume vcpus")]
-    ResumeVcpus(#[source] MigratableError),
+    ResumeVcpus(#[source] PausableError),
     #[error("Failed signal config interrupt")]
     ConfigChange(#[source] io::Error),
     #[error("Disk resize failed")]
@@ -1238,11 +1238,11 @@ impl VirtioDevice for Block {
 }
 
 impl Pausable for Block {
-    fn pause(&mut self) -> result::Result<(), MigratableError> {
+    fn pause(&mut self) -> result::Result<(), PausableError> {
         self.common.pause()
     }
 
-    fn resume(&mut self) -> result::Result<(), MigratableError> {
+    fn resume(&mut self) -> result::Result<(), PausableError> {
         self.common.resume()
     }
 }

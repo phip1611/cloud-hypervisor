@@ -74,7 +74,7 @@ use vm_memory::ByteValued;
 use vm_memory::{Bytes, GuestAddressSpace};
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
 use vm_migration::{
-    Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable, Transportable,
+    Migratable, MigratableError, Pausable, PausableError, Snapshot, SnapshotData, Snapshottable, Transportable,
     snapshot_from_id,
 };
 use vmm_sys_util::eventfd::EventFd;
@@ -2627,12 +2627,12 @@ impl Aml for CpuManager {
 }
 
 impl Pausable for CpuManager {
-    fn pause(&mut self) -> std::result::Result<(), MigratableError> {
+    fn pause(&mut self) -> std::result::Result<(), PausableError> {
         // Tell the vCPUs to pause themselves next time they exit
         self.vcpus_pause_signalled.store(true, Ordering::SeqCst);
 
         self.signal_vcpus()
-            .map_err(|e| MigratableError::Pause(anyhow!("Error signalling vCPUs: {e}")))?;
+            .map_err(|e| PausableError::Pause(format!("Error signalling vCPUs: {e}")))?;
 
         // Notify all guests (including Hyper-V / Windows) that the clock was
         // paused.  KVM_KVMCLOCK_CTRL updates internal KVM state that affects
@@ -2642,7 +2642,7 @@ impl Pausable for CpuManager {
         for vcpu in self.vcpus.iter() {
             let vcpu = vcpu.lock().unwrap();
             vcpu.vcpu.notify_guest_clock_paused().map_err(|e| {
-                MigratableError::Pause(anyhow!("Could not notify guest it has been paused {e:?}"))
+                PausableError::Pause(format!("Could not notify guest it has been paused {e:?}"))
             })?;
         }
 
@@ -2661,7 +2661,7 @@ impl Pausable for CpuManager {
         Ok(())
     }
 
-    fn resume(&mut self) -> std::result::Result<(), MigratableError> {
+    fn resume(&mut self) -> std::result::Result<(), PausableError> {
         // Ensure that vCPUs keep running after being unpark() in
         // their run vCPU loop.
         self.vcpus_pause_signalled.store(false, Ordering::SeqCst);

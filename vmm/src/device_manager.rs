@@ -105,7 +105,7 @@ use vm_memory::{Address, GuestAddress, GuestMemoryRegion, GuestUsize, MmapRegion
 use vm_memory::{GuestAddressSpace, GuestMemory};
 use vm_migration::protocol::MemoryRangeTable;
 use vm_migration::{
-    Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable, Transportable,
+    Migratable, MigratableError, Pausable, PausableError, Snapshot, SnapshotData, Snapshottable, Transportable,
     snapshot_from_id, state_from_id,
 };
 use vm_virtio::{AccessPlatform, VirtioDeviceType};
@@ -5664,12 +5664,12 @@ impl Aml for DeviceManager {
 }
 
 impl Pausable for DeviceManager {
-    fn pause(&mut self) -> result::Result<(), MigratableError> {
+    fn pause(&mut self) -> result::Result<(), PausableError> {
         for (_, device_node) in self.device_tree.lock().unwrap().iter() {
             if let Some(migratable) = &device_node.migratable {
                 match migratable.lock().unwrap().pause() {
                     Ok(()) => {}
-                    Err(MigratableError::DeviceDisconnected(id)) => {
+                    Err(PausableError::DeviceDisconnected(id)) => {
                         warn!("Skipping pause for disconnected device {id}");
                     }
                     Err(e) => return Err(e),
@@ -5691,12 +5691,12 @@ impl Pausable for DeviceManager {
         Ok(())
     }
 
-    fn resume(&mut self) -> result::Result<(), MigratableError> {
+    fn resume(&mut self) -> result::Result<(), PausableError> {
         for (_, device_node) in self.device_tree.lock().unwrap().iter() {
             if let Some(migratable) = &device_node.migratable {
                 match migratable.lock().unwrap().resume() {
                     Ok(()) => {}
-                    Err(MigratableError::DeviceDisconnected(id)) => {
+                    Err(PausableError::DeviceDisconnected(id)) => {
                         warn!("Skipping resume for disconnected device {id}");
                     }
                     Err(e) => return Err(e),

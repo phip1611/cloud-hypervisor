@@ -79,7 +79,7 @@ use vm_memory::{Address, ByteValued, GuestMemoryRegion, ReadVolatile};
 use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
 use vm_migration::protocol::{MemoryRangeTable, Request, Response};
 use vm_migration::{
-    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, snapshot_from_id,
+    Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable, snapshot_from_id,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
@@ -223,10 +223,10 @@ pub enum Error {
     ResumeCpus(#[source] MigratableError),
 
     #[error("Cannot pause VM")]
-    Pause(#[source] MigratableError),
+    Pause(#[source] PausableError),
 
     #[error("Cannot resume VM")]
-    Resume(#[source] MigratableError),
+    Resume(#[source] PausableError),
 
     #[error("Memory manager error")]
     MemoryManager(#[source] MemoryManagerError),
@@ -3234,19 +3234,19 @@ impl Vm {
 }
 
 impl Pausable for Vm {
-    fn pause(&mut self) -> std::result::Result<(), MigratableError> {
+    fn pause(&mut self) -> std::result::Result<(), PausableError> {
         event!("vm", "pausing");
         let new_state = VmState::Paused;
         self.state
             .valid_transition(new_state)
-            .map_err(|e| MigratableError::Pause(anyhow!("Invalid transition: {e:?}")))?;
+            .map_err(|e| PausableError::Pause(format!("Invalid transition: {e:?}")))?;
 
         #[cfg(target_arch = "x86_64")]
         {
             let mut clock = self
                 .vm
                 .get_clock()
-                .map_err(|e| MigratableError::Pause(anyhow!("Could not get VM clock: {e}")))?;
+                .map_err(|e| PausableError::Pause(format!("Could not get VM clock: {e}")))?;
             clock.reset_flags();
             self.saved_clock = Some(clock);
         }
@@ -3254,7 +3254,7 @@ impl Pausable for Vm {
         // Before pausing the vCPUs activate any pending virtio devices that might
         // need activation between starting the pause (or e.g. a migration it's part of)
         self.activate_virtio_devices().map_err(|e| {
-            MigratableError::Pause(anyhow!("Error activating pending virtio devices: {e:?}"))
+            PausableError::Pause(format!("Error activating pending virtio devices: {e:?}"))
         })?;
 
         self.cpu_manager.lock().unwrap().pause()?;
@@ -3262,7 +3262,7 @@ impl Pausable for Vm {
 
         self.vm
             .pause()
-            .map_err(|e| MigratableError::Pause(anyhow!("Could not pause the VM: {e}")))?;
+            .map_err(|e| PausableError::Pause(format!("Could not pause the VM: {e}")))?;
 
         self.state = new_state;
 
@@ -3270,14 +3270,14 @@ impl Pausable for Vm {
         Ok(())
     }
 
-    fn resume(&mut self) -> std::result::Result<(), MigratableError> {
+    fn resume(&mut self) -> std::result::Result<(), PausableError> {
         event!("vm", "resuming");
         let current_state = self.get_state();
         let new_state = VmState::Running;
 
         self.state
             .valid_transition(new_state)
-            .map_err(|e| MigratableError::Resume(anyhow!("Invalid transition: {e:?}")))?;
+            .map_err(|e| PausableError::Resume(format!("Invalid transition: {e:?}")))?;
 
         // Restore KVM clock BEFORE vCPUs start running, so they see correct
         // TSC/kvmclock from the first instruction after resume.
@@ -3286,14 +3286,14 @@ impl Pausable for Vm {
             if let Some(clock) = &self.saved_clock {
                 self.vm
                     .set_clock(clock)
-                    .map_err(|e| MigratableError::Resume(anyhow!("Could not set VM clock: {e}")))?;
+                    .map_err(|e| PausableError::Resume(format!("Could not set VM clock: {e}")))?;
             }
         }
 
         if current_state == VmState::Paused {
             self.vm
                 .resume()
-                .map_err(|e| MigratableError::Resume(anyhow!("Could not resume the VM: {e}")))?;
+                .map_err(|e| PausableError::Resume(format!("Could not resume the VM: {e}")))?;
         }
 
         self.device_manager.lock().unwrap().resume()?;

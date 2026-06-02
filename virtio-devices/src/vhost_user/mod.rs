@@ -23,7 +23,7 @@ use vm_memory::guest_memory::Error as MmapError;
 use vm_memory::mmap::MmapRegionError;
 use vm_memory::{Address, GuestAddressSpace, GuestMemory, GuestMemoryAtomic};
 use vm_migration::protocol::MemoryRangeTable;
-use vm_migration::{MigratableError, Pausable, Snapshot};
+use vm_migration::{MigratableError, Pausable, PausableError, Snapshot};
 use vmm_sys_util::eventfd::EventFd;
 use vu_common_ctrl::VhostUserHandle;
 
@@ -664,9 +664,9 @@ impl VhostUserCommon {
         Ok(())
     }
 
-    pub fn pause(&mut self) -> std::result::Result<(), MigratableError> {
+    pub fn pause(&mut self) -> std::result::Result<(), PausableError> {
         if self.disconnected.load(Ordering::Relaxed) {
-            return Err(MigratableError::DeviceDisconnected(
+            return Err(PausableError::DeviceDisconnected(
                 self.socket_path.clone(),
             ));
         }
@@ -676,12 +676,12 @@ impl VhostUserCommon {
         {
             if e.is_transport_lost() {
                 self.disconnected.store(true, Ordering::Relaxed);
-                return Err(MigratableError::DeviceDisconnected(
+                return Err(PausableError::DeviceDisconnected(
                     self.socket_path.clone(),
                 ));
             }
 
-            return Err(MigratableError::Pause(anyhow!(
+            return Err(PausableError::Pause(format!(
                 "Error pausing vhost-user backend for socket {}: {e:?}",
                 self.socket_path
             )));
@@ -689,11 +689,11 @@ impl VhostUserCommon {
         Ok(())
     }
 
-    fn resume_internal(&mut self) -> std::result::Result<(), MigratableError> {
+    fn resume_internal(&mut self) -> std::result::Result<(), PausableError> {
         // Skip the resume_vhost_user call if the backend is disconnected. Process the queue
         // interrupts to kick any paused workers.
         if self.disconnected.load(Ordering::Relaxed) {
-            return Err(MigratableError::DeviceDisconnected(
+            return Err(PausableError::DeviceDisconnected(
                 self.socket_path.clone(),
             ));
         }
@@ -703,12 +703,12 @@ impl VhostUserCommon {
         {
             if e.is_transport_lost() {
                 self.disconnected.store(true, Ordering::Relaxed);
-                return Err(MigratableError::DeviceDisconnected(
+                return Err(PausableError::DeviceDisconnected(
                     self.socket_path.clone(),
                 ));
             }
 
-            return Err(MigratableError::Resume(anyhow!(
+            return Err(PausableError::Resume(format!(
                 "Error resuming vhost-user backend for socket {}: {e:?}",
                 self.socket_path
             )));
@@ -717,7 +717,7 @@ impl VhostUserCommon {
         Ok(())
     }
 
-    pub fn resume(&mut self) -> std::result::Result<(), MigratableError> {
+    pub fn resume(&mut self) -> std::result::Result<(), PausableError> {
         let ret = self.resume_internal();
 
         // Always run the interrupt loop so workers don't get stuck.

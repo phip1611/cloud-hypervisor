@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vm_device::BusDevice;
 use vm_device::interrupt::InterruptSourceGroup;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 
 use crate::{read_le_u32, write_le_u32};
 

@@ -13,14 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
 use log::{error, info, warn};
 use virtio_bindings::virtio_config::VIRTIO_F_ACCESS_PLATFORM;
 use virtio_queue::Queue;
 use vm_device::UserspaceMapping;
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
-use vm_migration::{MigratableError, Pausable};
+use vm_migration::{Pausable, PausableError};
 use vm_virtio::{AccessPlatform, VirtioDeviceType};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -373,7 +372,7 @@ impl VirtioCommon {
 }
 
 impl Pausable for VirtioCommon {
-    fn pause(&mut self) -> std::result::Result<(), MigratableError> {
+    fn pause(&mut self) -> std::result::Result<(), PausableError> {
         info!(
             "Pausing virtio-{}",
             VirtioDeviceType::from(self.device_type)
@@ -386,9 +385,7 @@ impl Pausable for VirtioCommon {
         }
 
         if let Some(pause_evt) = &self.pause_evt {
-            pause_evt
-                .write(1)
-                .map_err(|e| MigratableError::Pause(e.into()))?;
+            pause_evt.write(1).map_err(PausableError::pause)?;
 
             // Wait for all threads to acknowledge the pause before going
             // any further. This is exclusively performed when pause_evt
@@ -401,7 +398,7 @@ impl Pausable for VirtioCommon {
         Ok(())
     }
 
-    fn resume(&mut self) -> std::result::Result<(), MigratableError> {
+    fn resume(&mut self) -> std::result::Result<(), PausableError> {
         info!(
             "Resuming virtio-{}",
             VirtioDeviceType::from(self.device_type)
@@ -417,7 +414,7 @@ impl Pausable for VirtioCommon {
         // that may already contain pending requests.
         for queue_evt in &self.queue_evts {
             queue_evt.write(1).map_err(|e| {
-                MigratableError::Resume(anyhow!(
+                PausableError::Resume(format!(
                     "Could not notify restored virtio worker on resume: {e}"
                 ))
             })?;

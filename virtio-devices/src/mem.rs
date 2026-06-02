@@ -34,7 +34,7 @@ use vm_memory::{
     GuestMemoryError, GuestMemoryLoadGuard, GuestMemoryRegion,
 };
 use vm_migration::protocol::MemoryRangeTable;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 use super::{
@@ -1023,11 +1023,11 @@ impl VirtioDevice for Mem {
 }
 
 impl Pausable for Mem {
-    fn pause(&mut self) -> result::Result<(), MigratableError> {
+    fn pause(&mut self) -> result::Result<(), PausableError> {
         self.common.pause()
     }
 
-    fn resume(&mut self) -> result::Result<(), MigratableError> {
+    fn resume(&mut self) -> result::Result<(), PausableError> {
         self.common.resume()
     }
 }

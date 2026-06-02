@@ -41,9 +41,9 @@ pub enum GuestDebuggableError {
     #[error("coredump file")]
     CoredumpFile(#[source] std::io::Error),
     #[error("Failed to pause")]
-    Pause(#[source] vm_migration::MigratableError),
+    Pause(#[source] vm_migration::PausableError),
     #[error("Failed to resume")]
-    Resume(#[source] vm_migration::MigratableError),
+    Resume(#[source] vm_migration::PausableError),
 }
 
 pub trait GuestDebuggable: vm_migration::Pausable {

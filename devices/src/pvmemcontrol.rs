@@ -23,7 +23,7 @@ use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
     GuestMemoryError, GuestMemoryMmap, Le32, Le64,
 };
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 
 const PVMEMCONTROL_VENDOR_ID: u16 = 0x1ae0;
 const PVMEMCONTROL_DEVICE_ID: u16 = 0x0087;
@@ -781,11 +781,11 @@ impl PciDevice for PvmemcontrolPciDevice {
 }
 
 impl Pausable for PvmemcontrolPciDevice {
-    fn pause(&mut self) -> std::result::Result<(), MigratableError> {
+    fn pause(&mut self) -> std::result::Result<(), PausableError> {
         Ok(())
     }
 
-    fn resume(&mut self) -> std::result::Result<(), MigratableError> {
+    fn resume(&mut self) -> std::result::Result<(), PausableError> {
         Ok(())
     }
 }

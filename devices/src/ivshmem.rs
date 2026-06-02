@@ -23,7 +23,7 @@ use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::{BusDevice, Resource, UserspaceMapping};
 use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::{Address, GuestAddress};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 
 const IVSHMEM_BAR0_IDX: usize = 0;
 const IVSHMEM_BAR1_IDX: usize = 1;

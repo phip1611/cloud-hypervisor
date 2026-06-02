@@ -33,7 +33,7 @@ use vm_device::interrupt::{
 };
 use vm_device::{BusDevice, PciBarType, Resource};
 use vm_memory::{Address, ByteValued, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, Le32};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
 use vm_virtio::AccessPlatform;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -1313,11 +1313,11 @@ impl BusDevice for VirtioPciDevice {
 }
 
 impl Pausable for VirtioPciDevice {
-    fn pause(&mut self) -> std::result::Result<(), MigratableError> {
+    fn pause(&mut self) -> std::result::Result<(), PausableError> {
         Ok(())
     }
 
-    fn resume(&mut self) -> std::result::Result<(), MigratableError> {
+    fn resume(&mut self) -> std::result::Result<(), PausableError> {
         Ok(())
     }
 }
