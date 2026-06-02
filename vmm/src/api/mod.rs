@@ -44,7 +44,7 @@ use micro_http::Body;
 use option_parser::{OptionParser, OptionParserError, Toggle};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use vm_migration::MigratableError;
+use vm_migration::{MigrationReceiveError, MigrationSendError};
 use vmm_sys_util::eventfd::EventFd;
 
 #[cfg(feature = "dbus_api")]
@@ -197,11 +197,11 @@ pub enum ApiError {
 
     /// Error starting migration receiver
     #[error("Error starting migration receiver")]
-    VmReceiveMigration(#[source] MigratableError),
+    VmReceiveMigration(#[source] MigrationReceiveError),
 
     /// Error starting migration sender
     #[error("Error starting migration sender")]
-    VmSendMigration(#[source] MigratableError),
+    VmSendMigration(#[source] MigrationSendError),
 
     /// Error triggering power button
     #[error("Error triggering power button")]
@@ -576,12 +576,12 @@ pub trait RequestHandler {
     fn vm_receive_migration(
         &mut self,
         receive_data_migration: VmReceiveMigrationData,
-    ) -> Result<(), MigratableError>;
+    ) -> Result<(), MigrationReceiveError>;
 
     fn vm_send_migration(
         &mut self,
         send_data_migration: VmSendMigrationData,
-    ) -> Result<(), MigratableError>;
+    ) -> Result<(), MigrationSendError>;
 
     fn vm_nmi(&mut self) -> Result<(), VmError>;
 }

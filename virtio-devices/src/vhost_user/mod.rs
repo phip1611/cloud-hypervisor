@@ -23,7 +23,7 @@ use vm_memory::guest_memory::Error as MmapError;
 use vm_memory::mmap::MmapRegionError;
 use vm_memory::{Address, GuestAddressSpace, GuestMemory, GuestMemoryAtomic};
 use vm_migration::protocol::MemoryRangeTable;
-use vm_migration::{MigratableError, Pausable, PausableError, SnapshotError, Snapshot};
+use vm_migration::{MigrationLifecycleError, Pausable, PausableError, Snapshot, SnapshotError};
 use vmm_sys_util::eventfd::EventFd;
 use vu_common_ctrl::VhostUserHandle;
 
@@ -666,9 +666,7 @@ impl VhostUserCommon {
 
     pub fn pause(&mut self) -> std::result::Result<(), PausableError> {
         if self.disconnected.load(Ordering::Relaxed) {
-            return Err(PausableError::DeviceDisconnected(
-                self.socket_path.clone(),
-            ));
+            return Err(PausableError::DeviceDisconnected(self.socket_path.clone()));
         }
 
         if let Some(vu) = &self.vu
@@ -676,9 +674,7 @@ impl VhostUserCommon {
         {
             if e.is_transport_lost() {
                 self.disconnected.store(true, Ordering::Relaxed);
-                return Err(PausableError::DeviceDisconnected(
-                    self.socket_path.clone(),
-                ));
+                return Err(PausableError::DeviceDisconnected(self.socket_path.clone()));
             }
 
             return Err(PausableError::Pause(format!(
@@ -693,9 +689,7 @@ impl VhostUserCommon {
         // Skip the resume_vhost_user call if the backend is disconnected. Process the queue
         // interrupts to kick any paused workers.
         if self.disconnected.load(Ordering::Relaxed) {
-            return Err(PausableError::DeviceDisconnected(
-                self.socket_path.clone(),
-            ));
+            return Err(PausableError::DeviceDisconnected(self.socket_path.clone()));
         }
 
         if let Some(vu) = &self.vu
@@ -703,9 +697,7 @@ impl VhostUserCommon {
         {
             if e.is_transport_lost() {
                 self.disconnected.store(true, Ordering::Relaxed);
-                return Err(PausableError::DeviceDisconnected(
-                    self.socket_path.clone(),
-                ));
+                return Err(PausableError::DeviceDisconnected(self.socket_path.clone()));
             }
 
             return Err(PausableError::Resume(format!(
@@ -773,7 +765,7 @@ impl VhostUserCommon {
     pub fn start_dirty_log(
         &mut self,
         guest_memory: &Option<GuestMemoryAtomic<GuestMemoryMmap>>,
-    ) -> std::result::Result<(), MigratableError> {
+    ) -> std::result::Result<(), MigrationLifecycleError> {
         if let Some(vu) = &self.vu {
             if let Some(guest_memory) = guest_memory {
                 let last_ram_addr = guest_memory.memory().last_addr().raw_value();
@@ -781,24 +773,22 @@ impl VhostUserCommon {
                     .unwrap()
                     .start_dirty_log(last_ram_addr)
                     .map_err(|e| {
-                        MigratableError::StartDirtyLog(anyhow!(
+                        MigrationLifecycleError::start_dirty_log(format!(
                             "Error starting migration for vhost-user backend: {e:?}"
                         ))
                     })
             } else {
-                Err(MigratableError::StartDirtyLog(anyhow!(
-                    "Missing guest memory"
-                )))
+                Err(MigrationLifecycleError::MissingGuestMemory)
             }
         } else {
             Ok(())
         }
     }
 
-    pub fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+    pub fn stop_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         if let Some(vu) = &self.vu {
             vu.lock().unwrap().stop_dirty_log().map_err(|e| {
-                MigratableError::StopDirtyLog(anyhow!(
+                MigrationLifecycleError::stop_dirty_log(format!(
                     "Error stopping migration for vhost-user backend: {e:?}"
                 ))
             })
@@ -810,36 +800,36 @@ impl VhostUserCommon {
     pub fn dirty_log(
         &mut self,
         guest_memory: &Option<GuestMemoryAtomic<GuestMemoryMmap>>,
-    ) -> std::result::Result<MemoryRangeTable, MigratableError> {
+    ) -> std::result::Result<MemoryRangeTable, MigrationLifecycleError> {
         if let Some(vu) = &self.vu {
             if let Some(guest_memory) = guest_memory {
                 let last_ram_addr = guest_memory.memory().last_addr().raw_value();
                 vu.lock().unwrap().dirty_log(last_ram_addr).map_err(|e| {
-                    MigratableError::DirtyLog(anyhow!(
+                    MigrationLifecycleError::dirty_log(format!(
                         "Error retrieving dirty ranges from vhost-user backend: {e:?}"
                     ))
                 })
             } else {
-                Err(MigratableError::DirtyLog(anyhow!("Missing guest memory")))
+                Err(MigrationLifecycleError::MissingGuestMemory)
             }
         } else {
             Ok(MemoryRangeTable::default())
         }
     }
 
-    pub fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    pub fn start_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.migration_started = true;
         Ok(())
     }
 
-    pub fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    pub fn complete_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.migration_started = false;
 
         // Make sure the device thread is killed in order to prevent from
         // reconnections to the socket.
         if let Some(kill_evt) = self.virtio_common.kill_evt.take() {
             kill_evt.write(1).map_err(|e| {
-                MigratableError::CompleteMigration(anyhow!(
+                MigrationLifecycleError::complete_migration(format!(
                     "Error killing vhost-user thread: {e:?}"
                 ))
             })?;

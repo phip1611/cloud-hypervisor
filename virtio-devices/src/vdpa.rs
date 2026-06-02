@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{io, result};
 
-use anyhow::anyhow;
 use event_monitor::event;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
@@ -22,7 +21,10 @@ use virtio_queue::desc::RawDescriptor;
 use virtio_queue::{Queue, QueueT};
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
-use vm_migration::{Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable};
+use vm_migration::{
+    Migratable, MigrationLifecycleError, Pausable, PausableError, Snapshot, SnapshotError,
+    Snapshottable, Transportable,
+};
 use vm_virtio::{AccessPlatform, Translatable};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -530,23 +532,25 @@ impl Snapshottable for Vdpa {
 impl Transportable for Vdpa {}
 
 impl Migratable for Vdpa {
-    fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn start_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.migrating = true;
         // Given there's no way to track dirty pages, we must suspend the
         // device as soon as the migration process starts.
         if self.backend_features & (1 << VHOST_BACKEND_F_SUSPEND) != 0 {
             assert!(self.vhost.is_some());
             self.vhost.as_ref().unwrap().suspend().map_err(|e| {
-                MigratableError::StartMigration(anyhow!("Error suspending vDPA device: {e:?}"))
+                MigrationLifecycleError::start_migration(format!(
+                    "Error suspending vDPA device: {e:?}"
+                ))
             })
         } else {
-            Err(MigratableError::StartMigration(anyhow!(
-                "vDPA device can't be suspended"
-            )))
+            Err(MigrationLifecycleError::start_migration(
+                "vDPA device can't be suspended",
+            ))
         }
     }
 
-    fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn complete_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.migrating = false;
         Ok(())
     }

@@ -20,7 +20,6 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::{ffi, result, thread};
 
 use acpi_tables::{Aml, aml};
-use anyhow::anyhow;
 use arch::RegionType;
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
@@ -45,8 +44,8 @@ use vm_memory::{
 };
 use vm_migration::protocol::{MemoryRange, MemoryRangeTable};
 use vm_migration::{
-    Migratable, MigratableError, Pausable, RestoreError, Snapshot, SnapshotData, SnapshotError,
-    Snapshottable, Transportable, UffdError,
+    Migratable, MigrationLifecycleError, MigrationSendError, Pausable, RestoreError, Snapshot,
+    SnapshotData, SnapshotError, Snapshottable, Transportable, UffdError,
 };
 use vmm_sys_util::eventfd::EventFd;
 
@@ -1899,8 +1898,8 @@ impl MemoryManager {
         exit_evt: &EventFd,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         if let Some(source_url) = source_url {
-            let mut memory_file_path = url_to_path(source_url)
-                .map_err(|e| Error::Restore(RestoreError::restore(e)))?;
+            let mut memory_file_path =
+                url_to_path(source_url).map_err(|e| Error::Restore(RestoreError::restore(e)))?;
             memory_file_path.push(String::from(SNAPSHOT_FILENAME));
 
             let mem_snapshot: MemoryManagerSnapshotData =
@@ -2675,7 +2674,7 @@ impl MemoryManager {
     pub fn memory_range_table(
         &self,
         snapshot: bool,
-    ) -> std::result::Result<MemoryRangeTable, MigratableError> {
+    ) -> std::result::Result<MemoryRangeTable, MigrationLifecycleError> {
         let mut table = MemoryRangeTable::default();
 
         for memory_zone in self.memory_zones.values() {
@@ -2783,7 +2782,7 @@ impl MemoryManager {
     ) -> std::result::Result<(), GuestDebuggableError> {
         let snapshot_memory_ranges = self
             .memory_range_table(false)
-            .map_err(|e| GuestDebuggableError::Coredump(e.into()))?;
+            .map_err(GuestDebuggableError::coredump)?;
 
         if snapshot_memory_ranges.is_empty() {
             return Ok(());
@@ -2803,7 +2802,7 @@ impl MemoryManager {
                         &mut coredump_file.as_fd(),
                         (range.length - offset) as usize,
                     )
-                    .map_err(|e| GuestDebuggableError::Coredump(e.into()))?;
+                    .map_err(GuestDebuggableError::coredump)?;
                 offset += bytes_written as u64;
                 total_bytes += bytes_written as u64;
 
@@ -3282,12 +3281,13 @@ impl Transportable for MemoryManager {
         &self,
         _snapshot: &Snapshot,
         destination_url: &str,
-    ) -> result::Result<(), MigratableError> {
+    ) -> result::Result<(), MigrationSendError> {
         if self.snapshot_memory_ranges.is_empty() {
             return Ok(());
         }
 
-        let mut memory_file_path = url_to_path(destination_url)?;
+        let mut memory_file_path =
+            url_to_path(destination_url).map_err(MigrationSendError::send)?;
         memory_file_path.push(String::from(SNAPSHOT_FILENAME));
 
         let mut memory_file = OpenOptions::new()
@@ -3295,7 +3295,7 @@ impl Transportable for MemoryManager {
             .write(true)
             .create_new(true)
             .open(&memory_file_path)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .map_err(MigrationSendError::send)?;
 
         let total_len: u64 = self
             .snapshot_memory_ranges
@@ -3336,7 +3336,7 @@ impl Transportable for MemoryManager {
                     file_cursor,
                     range.length,
                 )
-                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+                .map_err(MigrationSendError::send)?;
             }
 
             if !wrote_sparse {
@@ -3346,7 +3346,7 @@ impl Transportable for MemoryManager {
                 // volatile copy.
                 memory_file
                     .seek(SeekFrom::Start(file_cursor))
-                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+                    .map_err(MigrationSendError::send)?;
                 let mut offset: u64 = 0;
                 // Manual partial-write loop preserves the workaround for
                 // https://github.com/rust-vmm/vm-memory/issues/174
@@ -3357,7 +3357,7 @@ impl Transportable for MemoryManager {
                             &mut memory_file,
                             (range.length - offset) as usize,
                         )
-                        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+                        .map_err(MigrationSendError::send)?;
                     offset += bytes_written as u64;
                     if offset == range.length {
                         break;
@@ -3378,10 +3378,10 @@ impl Migratable for MemoryManager {
     // Also, reset the dirty bitmap logged by the vmm.
     // Just before we do a bulk copy we want to start/clear the dirty log so that
     // pages touched during our bulk copy are tracked.
-    fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
-        self.vm.start_dirty_log().map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error starting VM dirty log {e}"))
-        })?;
+    fn start_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
+        self.vm
+            .start_dirty_log()
+            .map_err(|e| MigrationLifecycleError::start_dirty_log(e))?;
 
         for r in self.guest_memory.memory().iter() {
             (**r).bitmap().reset();
@@ -3390,22 +3390,23 @@ impl Migratable for MemoryManager {
         Ok(())
     }
 
-    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
-        self.vm.stop_dirty_log().map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error stopping VM dirty log {e}"))
-        })?;
+    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
+        self.vm
+            .stop_dirty_log()
+            .map_err(|e| MigrationLifecycleError::stop_dirty_log(e))?;
 
         Ok(())
     }
 
     // Generate a table for the pages that are dirty. The dirty pages are collapsed
     // together in the table if they are contiguous.
-    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigrationLifecycleError> {
         let mut table = MemoryRangeTable::default();
         for r in &self.guest_ram_mappings {
-            let vm_dirty_bitmap = self.vm.get_dirty_log(r.slot, r.gpa, r.size).map_err(|e| {
-                MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {e}"))
-            })?;
+            let vm_dirty_bitmap = self
+                .vm
+                .get_dirty_log(r.slot, r.gpa, r.size)
+                .map_err(|e| MigrationLifecycleError::dirty_log(e))?;
             let vmm_dirty_bitmap = match self.guest_memory.memory().find_region(GuestAddress(r.gpa))
             {
                 Some(region) => {
@@ -3414,10 +3415,7 @@ impl Migratable for MemoryManager {
                     (**region).bitmap().get_and_reset()
                 }
                 None => {
-                    return Err(MigratableError::MigrateSend(anyhow!(
-                        "Error finding 'guest memory region' with address {:x}",
-                        r.gpa
-                    )));
+                    return Err(MigrationLifecycleError::MissingGuestMemoryRegion { gpa: r.gpa });
                 }
             };
 

@@ -24,7 +24,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{cmp, result, str, thread};
 
-use anyhow::anyhow;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use arch::PciSpaceInfo;
 #[cfg(target_arch = "x86_64")]
@@ -79,7 +78,8 @@ use vm_memory::{Address, ByteValued, GuestMemoryRegion, ReadVolatile};
 use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
 use vm_migration::protocol::{MemoryRangeTable, Request, Response};
 use vm_migration::{
-    Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable, snapshot_from_id,
+    Migratable, MigrationLifecycleError, MigrationSendError, Pausable, PausableError, RestoreError,
+    Snapshot, SnapshotError, Snapshottable, Transportable, snapshot_from_id,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
@@ -211,16 +211,16 @@ pub enum Error {
     CpuManager(#[source] cpu::Error),
 
     #[error("Cannot pause devices")]
-    PauseDevices(#[source] MigratableError),
+    PauseDevices(#[source] PausableError),
 
     #[error("Cannot resume devices")]
-    ResumeDevices(#[source] MigratableError),
+    ResumeDevices(#[source] PausableError),
 
     #[error("Cannot pause CPUs")]
-    PauseCpus(#[source] MigratableError),
+    PauseCpus(#[source] PausableError),
 
     #[error("Cannot resume cpus")]
-    ResumeCpus(#[source] MigratableError),
+    ResumeCpus(#[source] PausableError),
 
     #[error("Cannot pause VM")]
     Pause(#[source] PausableError),
@@ -238,10 +238,10 @@ pub enum Error {
     Snapshot(#[source] SnapshotError),
 
     #[error("Cannot restore VM")]
-    Restore(#[source] MigratableError),
+    Restore(#[source] RestoreError),
 
     #[error("Cannot send VM snapshot")]
-    SnapshotSend(#[source] MigratableError),
+    SnapshotSend(#[source] MigrationSendError),
 
     #[error("Invalid restore source URL")]
     InvalidRestoreSourceUrl,
@@ -3032,7 +3032,7 @@ impl Vm {
     pub fn send_memory_fds(
         &mut self,
         socket: &mut UnixStream,
-    ) -> std::result::Result<(), MigratableError> {
+    ) -> std::result::Result<(), MigrationSendError> {
         for (slot, fd) in self
             .memory_manager
             .lock()
@@ -3042,25 +3042,21 @@ impl Vm {
         {
             Request::memory_fd(std::mem::size_of_val(&slot) as u64)
                 .write_to(socket)
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!("Error sending memory fd request: {e}"))
-                })?;
+                .map_err(MigrationSendError::from)?;
             socket
                 .send_with_fd(&slot.to_le_bytes()[..], fd)
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!("Error sending memory fd: {e}"))
-                })?;
+                .map_err(MigrationSendError::send)?;
 
-            Response::read_from(socket)?.ok_or_abandon(
-                socket,
-                MigratableError::MigrateSend(anyhow!("Error during memory fd migration")),
-            )?;
+            Response::read_from(socket)?
+                .ok_or_abandon(socket, MigrationSendError::MemoryRejected)?;
         }
 
         Ok(())
     }
 
-    pub fn memory_range_table(&self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+    pub fn memory_range_table(
+        &self,
+    ) -> std::result::Result<MemoryRangeTable, MigrationLifecycleError> {
         self.memory_manager
             .lock()
             .unwrap()
@@ -3197,7 +3193,7 @@ impl Vm {
             .write(true)
             .create_new(true)
             .open(coredump_file_path)
-            .map_err(|e| GuestDebuggableError::Coredump(e.into()))?;
+            .map_err(GuestDebuggableError::coredump)?;
 
         let mem_offset = self.coredump_get_mem_offset(elf_phdr_num, elf_note_size);
         let mem_data = self
@@ -3402,8 +3398,9 @@ impl Transportable for Vm {
         &self,
         snapshot: &Snapshot,
         destination_url: &str,
-    ) -> std::result::Result<(), MigratableError> {
-        let mut snapshot_config_path = url_to_path(destination_url)?;
+    ) -> std::result::Result<(), MigrationSendError> {
+        let mut snapshot_config_path =
+            url_to_path(destination_url).map_err(MigrationSendError::send)?;
         snapshot_config_path.push(SNAPSHOT_CONFIG_FILE);
 
         // Create the snapshot config file
@@ -3412,17 +3409,18 @@ impl Transportable for Vm {
             .write(true)
             .create_new(true)
             .open(snapshot_config_path)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .map_err(MigrationSendError::send)?;
 
         // Serialize and write the snapshot config
         let vm_config = serde_json::to_string(self.config.lock().unwrap().deref())
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .map_err(MigrationSendError::send)?;
 
         snapshot_config_file
             .write(vm_config.as_bytes())
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .map_err(MigrationSendError::send)?;
 
-        let mut snapshot_state_path = url_to_path(destination_url)?;
+        let mut snapshot_state_path =
+            url_to_path(destination_url).map_err(MigrationSendError::send)?;
         snapshot_state_path.push(SNAPSHOT_STATE_FILE);
 
         // Create the snapshot state file
@@ -3431,15 +3429,14 @@ impl Transportable for Vm {
             .write(true)
             .create_new(true)
             .open(snapshot_state_path)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .map_err(MigrationSendError::send)?;
 
         // Serialize and write the snapshot state
-        let vm_state =
-            serde_json::to_vec(snapshot).map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        let vm_state = serde_json::to_vec(snapshot).map_err(MigrationSendError::send)?;
 
         snapshot_state_file
             .write(&vm_state)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .map_err(MigrationSendError::send)?;
 
         // Tell the memory manager to also send/write its own snapshot.
         if let Some(memory_manager_snapshot) = snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID) {
@@ -3448,9 +3445,7 @@ impl Transportable for Vm {
                 .unwrap()
                 .send(&memory_manager_snapshot.clone(), destination_url)?;
         } else {
-            return Err(MigratableError::MigrateSend(anyhow!(
-                "Missing memory manager snapshot"
-            )));
+            return Err(MigrationSendError::send("Missing memory manager snapshot"));
         }
 
         Ok(())
@@ -3458,29 +3453,29 @@ impl Transportable for Vm {
 }
 
 impl Migratable for Vm {
-    fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+    fn start_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.memory_manager.lock().unwrap().start_dirty_log()?;
         self.device_manager.lock().unwrap().start_dirty_log()
     }
 
-    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.memory_manager.lock().unwrap().stop_dirty_log()?;
         self.device_manager.lock().unwrap().stop_dirty_log()
     }
 
-    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigrationLifecycleError> {
         Ok(MemoryRangeTable::new_from_tables(vec![
             self.memory_manager.lock().unwrap().dirty_log()?,
             self.device_manager.lock().unwrap().dirty_log()?,
         ]))
     }
 
-    fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn start_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.memory_manager.lock().unwrap().start_migration()?;
         self.device_manager.lock().unwrap().start_migration()
     }
 
-    fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn complete_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.memory_manager.lock().unwrap().complete_migration()?;
         self.device_manager.lock().unwrap().complete_migration()
     }
@@ -3584,9 +3579,9 @@ impl GuestDebuggable for Vm {
             if let Some(ref platform) = self.config.lock().unwrap().platform
                 && platform.tdx
             {
-                return Err(GuestDebuggableError::Coredump(anyhow!(
-                    "Coredump not possible with TDX VM"
-                )));
+                return Err(GuestDebuggableError::coredump(
+                    "Coredump not possible with TDX VM",
+                ));
             }
         }
 
@@ -3597,9 +3592,9 @@ impl GuestDebuggable for Vm {
             }
             VmState::Paused => {}
             _ => {
-                return Err(GuestDebuggableError::Coredump(anyhow!(
-                    "Trying to coredump while VM is not running or paused"
-                )));
+                return Err(GuestDebuggableError::coredump(
+                    "Trying to coredump while VM is not running or paused",
+                ));
             }
         }
 

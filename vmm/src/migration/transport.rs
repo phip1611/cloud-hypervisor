@@ -27,7 +27,7 @@ use vm_memory::{
     VolatileSlice, WriteVolatile,
 };
 use vm_migration::protocol::{Command, MemoryRangeTable, Request, Response};
-use vm_migration::{MigratableError, Snapshot};
+use vm_migration::{MigrationProtocolError, MigrationReceiveError, MigrationSendError, Snapshot};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
@@ -58,18 +58,18 @@ pub(crate) enum ReceiveListener {
 
 impl ReceiveListener {
     /// Block until a connection is accepted.
-    pub(crate) fn accept(&mut self) -> Result<SocketStream, MigratableError> {
+    pub(crate) fn accept(&mut self) -> Result<SocketStream, MigrationReceiveError> {
         match self {
             ReceiveListener::Tcp(listener) => listener
                 .accept()
                 .map(|(socket, _)| SocketStream::Tcp(socket))
                 .context("Failed to accept TCP migration connection")
-                .map_err(MigratableError::MigrateReceive),
+                .map_err(MigrationReceiveError::receive),
             ReceiveListener::Unix(listener) => listener
                 .accept()
                 .map(|(socket, _)| SocketStream::Unix(socket))
                 .context("Failed to accept Unix migration connection")
-                .map_err(MigratableError::MigrateReceive),
+                .map_err(MigrationReceiveError::receive),
         }
     }
 
@@ -77,10 +77,10 @@ impl ReceiveListener {
     fn abortable_accept(
         &mut self,
         abort_event: &impl AsRawFd,
-    ) -> Result<Option<SocketStream>, MigratableError> {
+    ) -> Result<Option<SocketStream>, MigrationReceiveError> {
         if wait_for_readable(&self, abort_event)
             .context("Error while waiting for socket to become readable")
-            .map_err(MigratableError::MigrateReceive)?
+            .map_err(MigrationReceiveError::receive)?
         {
             // The listener is readable; accept the connection.
             Ok(Some(self.accept()?))
@@ -91,18 +91,18 @@ impl ReceiveListener {
     }
 
     /// Tries to clone a [`ReceiveListener`].
-    pub(crate) fn try_clone(&self) -> Result<Self, MigratableError> {
+    pub(crate) fn try_clone(&self) -> Result<Self, MigrationReceiveError> {
         match self {
             ReceiveListener::Tcp(listener) => listener
                 .try_clone()
                 .map(ReceiveListener::Tcp)
                 .context("Failed to clone TCP listener")
-                .map_err(MigratableError::MigrateReceive),
+                .map_err(MigrationReceiveError::receive),
             ReceiveListener::Unix(listener) => listener
                 .try_clone()
                 .map(ReceiveListener::Unix)
                 .context("Failed to clone Unix listener")
-                .map_err(MigratableError::MigrateReceive),
+                .map_err(MigrationReceiveError::receive),
         }
     }
 }
@@ -263,7 +263,7 @@ fn wait_for_readable(fd: &impl AsFd, abort_event: &impl AsRawFd) -> Result<bool,
 pub(crate) struct ReceiveAdditionalConnections {
     /// This thread accepts incoming connections and spawns a new worker for
     /// each connection that handles receiving memory.
-    accept_thread: Option<thread::JoinHandle<Result<(), MigratableError>>>,
+    accept_thread: Option<thread::JoinHandle<Result<(), MigrationReceiveError>>>,
 
     /// This fd gets signaled when the migration stops, and will then stop
     /// the [`Self::accept_thread`].
@@ -278,30 +278,30 @@ impl ReceiveAdditionalConnections {
         listener: ReceiveListener,
         guest_memory: GuestMemoryAtomic<GuestMemoryMmap>,
         seccomp_action: &SeccompAction,
-    ) -> Result<Self, MigratableError> {
+    ) -> Result<Self, MigrationReceiveError> {
         let event_fd = EventFd::new(0)
             .context("Error creating terminate fd")
-            .map_err(MigratableError::MigrateReceive)?;
+            .map_err(MigrationReceiveError::receive)?;
 
         let terminate_fd = event_fd
             .try_clone()
             .context("Error cloning terminate fd")
-            .map_err(MigratableError::MigrateReceive)?;
+            .map_err(MigrationReceiveError::receive)?;
 
         let seccomp_filter = get_seccomp_filter(seccomp_action, Thread::MigrationTcpWorker, None)
             .context("Error creating migration TCP worker seccomp filter")
-            .map_err(MigratableError::MigrateReceive)?;
+            .map_err(MigrationReceiveError::receive)?;
 
         let accept_thread = thread::Builder::new()
             .name("migrate-receive-accept-connections".to_owned())
             .spawn(move || {
                 apply_migration_tcp_worker_seccomp_filter(&seccomp_filter)
-                    .map_err(MigratableError::MigrateReceive)?;
+                    .map_err(MigrationReceiveError::receive)?;
 
                 Self::accept_connections(listener, &terminate_fd, &guest_memory)
             })
             .context("Error creating connection accept thread")
-            .map_err(MigratableError::MigrateReceive)?;
+            .map_err(MigrationReceiveError::receive)?;
 
         Ok(Self {
             accept_thread: Some(accept_thread),
@@ -313,8 +313,8 @@ impl ReceiveAdditionalConnections {
         mut listener: ReceiveListener,
         terminate_fd: &EventFd,
         guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
-    ) -> Result<(), MigratableError> {
-        let mut threads: Vec<thread::JoinHandle<Result<(), MigratableError>>> = Vec::new();
+    ) -> Result<(), MigrationReceiveError> {
+        let mut threads: Vec<thread::JoinHandle<Result<(), MigrationReceiveError>>> = Vec::new();
         let mut first_err = loop {
             let socket = match listener.abortable_accept(terminate_fd) {
                 Ok(socket) => socket,
@@ -325,7 +325,7 @@ impl ReceiveAdditionalConnections {
             };
 
             if threads.len() >= MAX_MIGRATION_CONNECTIONS as usize {
-                break Err(MigratableError::MigrateReceive(anyhow!(
+                break Err(MigrationReceiveError::receive(anyhow!(
                     "Received more than {MAX_MIGRATION_CONNECTIONS} additional migration connections."
                 )));
             }
@@ -334,7 +334,7 @@ impl ReceiveAdditionalConnections {
             let terminate_fd = match terminate_fd
                 .try_clone()
                 .context("Error cloning terminate fd")
-                .map_err(MigratableError::MigrateReceive)
+                .map_err(MigrationReceiveError::receive)
             {
                 Ok(terminate_fd) => terminate_fd,
                 Err(e) => break Err(e),
@@ -348,7 +348,7 @@ impl ReceiveAdditionalConnections {
                 Ok(t) => threads.push(t),
                 Err(e) => {
                     error!("Error spawning receive-memory thread: {e}");
-                    break Err(MigratableError::MigrateReceive(
+                    break Err(MigrationReceiveError::receive(
                         anyhow!(e).context("Error spawning receive-memory thread"),
                     ));
                 }
@@ -367,7 +367,7 @@ impl ReceiveAdditionalConnections {
             let err = match thread.join() {
                 Ok(Ok(())) => None,
                 Ok(Err(e)) => Some(e),
-                Err(panic) => Some(MigratableError::MigrateReceive(anyhow!(
+                Err(panic) => Some(MigrationReceiveError::receive(anyhow!(
                     "receive-memory thread panicked: {panic:?}"
                 ))),
             };
@@ -389,13 +389,13 @@ impl ReceiveAdditionalConnections {
         mut socket: &mut SocketStream,
         terminate_fd: &EventFd,
         guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
-    ) -> Result<(), MigratableError> {
+    ) -> Result<(), MigrationReceiveError> {
         loop {
             // We only check whether we should abort when waiting for a new request. If the
             // sender stops sending data mid-request, we will hang forever.
             if !wait_for_readable(socket, terminate_fd)
                 .context("Failed to poll fds")
-                .map_err(MigratableError::MigrateReceive)?
+                .map_err(MigrationReceiveError::receive)?
             {
                 info!("Got signal to tear down connection.");
                 return Ok(());
@@ -403,7 +403,7 @@ impl ReceiveAdditionalConnections {
 
             let req = match Request::read_from(&mut socket) {
                 Ok(req) => req,
-                Err(MigratableError::MigrateSocket(io_error))
+                Err(MigrationProtocolError::Socket(io_error))
                     if io_error.kind() == ErrorKind::UnexpectedEof =>
                 {
                     // EOF is only handled here while reading the next request
@@ -416,14 +416,14 @@ impl ReceiveAdditionalConnections {
                     );
                     return Ok(());
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             };
 
             if req.command() != Command::Memory {
                 error!(
                     "Dropping connection. Only Memory commands are allowed on additional connections."
                 );
-                return Err(MigratableError::MigrateReceive(anyhow!(
+                return Err(MigrationReceiveError::receive(anyhow!(
                     "Received non memory command on migration receive worker: {:?}",
                     req.command()
                 )));
@@ -436,20 +436,20 @@ impl ReceiveAdditionalConnections {
 
     /// Signals to the worker threads that the migration is finished and joins them.
     /// If any thread encountered an error, this error is returned by this function.
-    pub(crate) fn cleanup(&mut self) -> Result<(), MigratableError> {
+    pub(crate) fn cleanup(&mut self) -> Result<(), MigrationReceiveError> {
         self.terminate_fd
             .write(1)
             .context("Failed to signal termination to worker threads.")
-            .map_err(MigratableError::MigrateReceive)?;
+            .map_err(MigrationReceiveError::receive)?;
         let accept_thread = self
             .accept_thread
             .take()
             .context("Error taking accept thread.")
-            .map_err(MigratableError::MigrateReceive)?;
+            .map_err(MigrationReceiveError::receive)?;
         accept_thread
             .join()
             .map_err(|panic| {
-                MigratableError::MigrateReceive(anyhow!(
+                MigrationReceiveError::receive(anyhow!(
                     "Accept connections thread panicked: {panic:?}"
                 ))
             })
@@ -494,7 +494,7 @@ enum SendMemoryThreadNotify {
 /// This struct keeps track of additional threads we use to send VM memory.
 pub(crate) struct SendAdditionalConnections {
     guest_memory: GuestMemoryAtomic<GuestMemoryMmap>,
-    threads: Vec<thread::JoinHandle<Result<(), MigratableError>>>,
+    threads: Vec<thread::JoinHandle<Result<(), MigrationSendError>>>,
     /// Sender to all workers. The receiver is shared by all workers.
     message_tx: SyncSender<SendMemoryThreadMessage>,
     /// If an error occurs in one of the memory sending threads, the main thread signals
@@ -537,7 +537,7 @@ impl SendAdditionalConnections {
         connections: NonZeroU32,
         guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
         seccomp_filter: &BpfProgram,
-    ) -> Result<Self, MigratableError> {
+    ) -> Result<Self, MigrationSendError> {
         let mut threads = Vec::new();
         let configured_connections = connections.get();
         let buffer_size = Self::BUFFERED_REQUESTS_PER_THREAD * configured_connections as usize;
@@ -573,7 +573,7 @@ impl SendAdditionalConnections {
                 .name(format!("migrate-send-memory-{n}"))
                 .spawn(move || {
                     apply_migration_tcp_worker_seccomp_filter(&seccomp_filter)
-                        .map_err(MigratableError::MigrateSend)?;
+                        .map_err(MigrationSendError::send)?;
 
                     Self::worker_send_memory(
                         &mut socket,
@@ -593,7 +593,7 @@ impl SendAdditionalConnections {
                     });
                 })
                 .context("Error spawning send-memory thread")
-                .map_err(MigratableError::MigrateSend)?;
+                .map_err(MigrationSendError::send)?;
             threads.push(thread);
         }
 
@@ -612,7 +612,7 @@ impl SendAdditionalConnections {
         message_rx: &Mutex<Receiver<SendMemoryThreadMessage>>,
         worker_error: &AtomicBool,
         notify_tx: &Sender<SendMemoryThreadNotify>,
-    ) -> Result<(), MigratableError> {
+    ) -> Result<(), MigrationSendError> {
         info!("Spawned thread to send VM memory.");
         loop {
             // Every memory sending thread receives messages from the main thread through this
@@ -620,7 +620,7 @@ impl SendAdditionalConnections {
             // workers are very quick, lock contention could become a performance issue.
             let message = message_rx
                 .lock()
-                .map_err(|_| MigratableError::MigrateSend(anyhow!("message_rx mutex is poisoned")))
+                .map_err(|_| MigrationSendError::send(anyhow!("message_rx mutex is poisoned")))
                 .inspect_err(|_| {
                     worker_error.store(true, Ordering::Relaxed);
                     // We ignore errors during error handling.
@@ -628,7 +628,7 @@ impl SendAdditionalConnections {
                 })?
                 .recv()
                 .context("Error receiving message from main thread")
-                .map_err(MigratableError::MigrateSend)
+                .map_err(MigrationSendError::send)
                 .inspect_err(|_| {
                     worker_error.store(true, Ordering::Relaxed);
                     notify_tx.send(SendMemoryThreadNotify::Error).ok();
@@ -641,13 +641,13 @@ impl SendAdditionalConnections {
                             notify_tx.send(SendMemoryThreadNotify::Error).ok();
                         })
                         .context("Error sending memory to receiver side")
-                        .map_err(MigratableError::MigrateSend)?;
+                        .map_err(MigrationSendError::send)?;
                 }
                 SendMemoryThreadMessage::Gate(gate) => {
                     notify_tx
                         .send(SendMemoryThreadNotify::Gate)
                         .context("Error sending gate notification to main thread")
-                        .map_err(MigratableError::MigrateSend)
+                        .map_err(MigrationSendError::send)
                         .inspect_err(|_| {
                             // Sending via `notify_tx` just failed, so we don't try to send another
                             // message via it.
@@ -671,7 +671,7 @@ impl SendAdditionalConnections {
         &mut self,
         table: MemoryRangeTable,
         socket: &mut SocketStream,
-    ) -> Result<bool, MigratableError> {
+    ) -> Result<bool, MigrationSendError> {
         if table.regions().is_empty() {
             return Ok(false);
         }
@@ -692,7 +692,7 @@ impl SendAdditionalConnections {
         Ok(true)
     }
 
-    fn send_chunk(&mut self, chunk: MemoryRangeTable) -> Result<(), MigratableError> {
+    fn send_chunk(&mut self, chunk: MemoryRangeTable) -> Result<(), MigrationSendError> {
         let mut chunk = SendMemoryThreadMessage::Memory(chunk);
         // [`Self::message_tx`] has a limited size, so we may have to retry sending the chunk
         loop {
@@ -714,22 +714,25 @@ impl SendAdditionalConnections {
                 }
                 Err(TrySendError::Disconnected(_)) => {
                     // The workers didn't disconnect for no reason, thus we do a cleanup.
-                    return Err(self.cleanup().err().unwrap_or(MigratableError::MigrateSend(
-                        anyhow!("All sending threads disconnected, but none returned an error?"),
-                    )));
+                    return Err(self
+                        .cleanup()
+                        .err()
+                        .unwrap_or(MigrationSendError::send(anyhow!(
+                            "All sending threads disconnected, but none returned an error?"
+                        ))));
                 }
             }
         }
     }
 
     /// Wait until all data that is in-flight has actually been sent and acknowledged.
-    fn wait_for_pending_data(&mut self) -> Result<(), MigratableError> {
+    fn wait_for_pending_data(&mut self) -> Result<(), MigrationSendError> {
         let gate = Arc::new(Gate::new());
         for _ in 0..self.threads.len() {
             self.message_tx
                 .send(SendMemoryThreadMessage::Gate(gate.clone()))
                 .context("Error sending gate message to workers")
-                .map_err(MigratableError::MigrateSend)?;
+                .map_err(MigrationSendError::send)?;
         }
 
         // We cannot simply wait at the gate, otherwise we might miss it when a sender
@@ -741,7 +744,7 @@ impl SendAdditionalConnections {
                 .notify_rx
                 .recv()
                 .context("Error receiving message from workers")
-                .map_err(MigratableError::MigrateSend)?
+                .map_err(MigrationSendError::send)?
             {
                 SendMemoryThreadNotify::Gate => {
                     seen_threads += 1;
@@ -762,7 +765,7 @@ impl SendAdditionalConnections {
     }
 
     /// Sends disconnect messages to all workers and joins them.
-    pub(crate) fn cleanup(&mut self) -> Result<(), MigratableError> {
+    pub(crate) fn cleanup(&mut self) -> Result<(), MigrationSendError> {
         // Send disconnect messages to all workers.
         for _ in 0..self.threads.len() {
             // All threads may have terminated, leading to a dropped receiver. Thus we ignore
@@ -777,7 +780,7 @@ impl SendAdditionalConnections {
             let err = match thread.join() {
                 Ok(Ok(())) => None,
                 Ok(Err(e)) => Some(e),
-                Err(panic) => Some(MigratableError::MigrateSend(anyhow!(
+                Err(panic) => Some(MigrationSendError::send(anyhow!(
                     "send-memory thread panicked: {panic:?}"
                 ))),
             };
@@ -806,30 +809,30 @@ impl Drop for SendAdditionalConnections {
 }
 
 /// Extract a UNIX socket path from a "unix:" migration URL.
-fn socket_url_to_path(url: &str) -> Result<PathBuf, anyhow::Error> {
+fn socket_url_to_path(url: &str) -> Result<PathBuf, String> {
     url.strip_prefix("unix:")
-        .ok_or_else(|| anyhow!("Could not extract path from URL: {url}"))
+        .ok_or_else(|| format!("Could not extract path from URL: {url}"))
         .map(|s| s.into())
 }
 
 /// Connect to a migration endpoint and return the established stream.
 pub(crate) fn send_migration_socket(
     destination_url: &str,
-) -> Result<SocketStream, MigratableError> {
+) -> Result<SocketStream, MigrationSendError> {
     if let Some(address) = destination_url.strip_prefix("tcp:") {
         info!("Connecting to TCP socket at {address}");
 
         let socket = TcpStream::connect(address).map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error connecting to TCP socket: {e}"))
+            MigrationSendError::send(anyhow!("Error connecting to TCP socket: {e}"))
         })?;
 
         Ok(SocketStream::Tcp(socket))
     } else {
-        let path = socket_url_to_path(destination_url).map_err(MigratableError::MigrateSend)?;
+        let path = socket_url_to_path(destination_url).map_err(MigrationSendError::send)?;
         info!("Connecting to UNIX socket at {path:?}");
 
         let socket = UnixStream::connect(&path).map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error connecting to UNIX socket: {e}"))
+            MigrationSendError::send(anyhow!("Error connecting to UNIX socket: {e}"))
         })?;
 
         Ok(SocketStream::Unix(socket))
@@ -839,26 +842,26 @@ pub(crate) fn send_migration_socket(
 /// Bind a migration listener for the receiver side.
 pub(crate) fn receive_migration_listener(
     receiver_url: &str,
-) -> Result<ReceiveListener, MigratableError> {
+) -> Result<ReceiveListener, MigrationReceiveError> {
     if let Some(address) = receiver_url.strip_prefix("tcp:") {
         TcpListener::bind(address)
             .map(ReceiveListener::Tcp)
             .context("Error binding to TCP socket")
-            .map_err(MigratableError::MigrateReceive)
+            .map_err(MigrationReceiveError::receive)
     } else {
-        let path = socket_url_to_path(receiver_url).map_err(MigratableError::MigrateReceive)?;
+        let path = socket_url_to_path(receiver_url).map_err(MigrationReceiveError::receive)?;
         UnixListener::bind(&path)
             .map(ReceiveListener::Unix)
             .context("Error binding to UNIX socket")
-            .map_err(MigratableError::MigrateReceive)
+            .map_err(MigrationReceiveError::receive)
     }
 }
 
 /// Read a response and return Ok(()) if it was a [`Response::Ok`].
 pub(crate) fn expect_ok_response(
     socket: &mut SocketStream,
-    error: MigratableError,
-) -> Result<(), MigratableError> {
+    error: MigrationSendError,
+) -> Result<(), MigrationSendError> {
     Response::read_from(socket)?
         .ok_or_abandon(socket, error)
         .map(|_| ())
@@ -868,8 +871,8 @@ pub(crate) fn expect_ok_response(
 pub(crate) fn send_request_expect_ok(
     socket: &mut SocketStream,
     request: Request,
-    error: MigratableError,
-) -> Result<(), MigratableError> {
+    error: MigrationSendError,
+) -> Result<(), MigrationSendError> {
     request.write_to(socket)?;
     expect_ok_response(socket, error)
 }
@@ -878,17 +881,17 @@ pub(crate) fn send_request_expect_ok(
 pub(crate) fn send_config(
     socket: &mut SocketStream,
     config: &VmMigrationConfig,
-) -> Result<(), MigratableError> {
+) -> Result<(), MigrationSendError> {
     let config_data = serde_json::to_vec(config)
         .context("Error serializing VM migration config")
-        .map_err(MigratableError::MigrateSend)?;
+        .map_err(MigrationSendError::send)?;
     Request::config(config_data.len() as u64).write_to(socket)?;
     socket
         .write_all(&config_data)
-        .map_err(MigratableError::MigrateSocket)?;
+        .map_err(MigrationProtocolError::Socket)?;
     expect_ok_response(
         socket,
-        MigratableError::MigrateSend(anyhow!("Error during config migration")),
+        MigrationSendError::send(anyhow!("Error during config migration")),
     )
 }
 
@@ -896,17 +899,17 @@ pub(crate) fn send_config(
 pub(crate) fn send_state(
     socket: &mut SocketStream,
     snapshot: &Snapshot,
-) -> Result<(), MigratableError> {
+) -> Result<(), MigrationSendError> {
     let snapshot_data = serde_json::to_vec(snapshot)
         .context("Error serializing VM snapshot")
-        .map_err(MigratableError::MigrateSend)?;
+        .map_err(MigrationSendError::send)?;
     Request::state(snapshot_data.len() as u64).write_to(socket)?;
     socket
         .write_all(&snapshot_data)
-        .map_err(MigratableError::MigrateSocket)?;
+        .map_err(MigrationProtocolError::Socket)?;
     expect_ok_response(
         socket,
-        MigratableError::MigrateSend(anyhow!("Error during state migration")),
+        MigrationSendError::send(anyhow!("Error during state migration")),
     )
 }
 
@@ -920,7 +923,7 @@ pub(crate) fn send_memory_ranges(
     guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ranges: &MemoryRangeTable,
     socket: &mut SocketStream,
-) -> Result<(), MigratableError> {
+) -> Result<(), MigrationSendError> {
     if ranges.regions().is_empty() {
         return Ok(());
     }
@@ -946,9 +949,7 @@ pub(crate) fn send_memory_ranges(
                     (range.length - offset) as usize,
                 )
                 .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!(
-                        "Error transferring memory to socket: {e}"
-                    ))
+                    MigrationSendError::send(anyhow!("Error transferring memory to socket: {e}"))
                 })?;
             offset += bytes_written as u64;
 
@@ -959,7 +960,7 @@ pub(crate) fn send_memory_ranges(
     }
     expect_ok_response(
         socket,
-        MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
+        MigrationSendError::send(anyhow!("Error during dirty memory migration")),
     )
 }
 
@@ -968,7 +969,7 @@ pub(crate) fn receive_memory_ranges(
     guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     req: &Request,
     socket: &mut SocketStream,
-) -> Result<(), MigratableError> {
+) -> Result<(), MigrationReceiveError> {
     debug_assert_eq!(req.command(), Command::Memory);
     // Read the memory table
     let ranges = MemoryRangeTable::read_from(socket, req.length())?;
@@ -991,7 +992,7 @@ pub(crate) fn receive_memory_ranges(
                     (range.length - offset) as usize,
                 )
                 .map_err(|e| {
-                    MigratableError::MigrateReceive(anyhow!(
+                    MigrationReceiveError::receive(anyhow!(
                         "Error receiving memory from socket: {e}"
                     ))
                 })?;

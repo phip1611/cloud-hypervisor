@@ -11,7 +11,7 @@ use std::thread;
 
 use libfuzzer_sys::{fuzz_target, Corpus};
 use micro_http::Request;
-use vm_migration::MigratableError;
+use vm_migration::{MigrationReceiveError, MigrationSendError};
 use vmm::api::http::*;
 use vmm::api::{
     ApiRequest, RequestHandler, VmInfoResponse, VmReceiveMigrationData, VmSendMigrationData,
@@ -292,11 +292,14 @@ impl RequestHandler for StubApiRequestHandler {
         Ok(())
     }
 
-    fn vm_receive_migration(&mut self, _: VmReceiveMigrationData) -> Result<(), MigratableError> {
+    fn vm_receive_migration(
+        &mut self,
+        _: VmReceiveMigrationData,
+    ) -> Result<(), MigrationReceiveError> {
         Ok(())
     }
 
-    fn vm_send_migration(&mut self, _: VmSendMigrationData) -> Result<(), MigratableError> {
+    fn vm_send_migration(&mut self, _: VmSendMigrationData) -> Result<(), MigrationSendError> {
         Ok(())
     }
 

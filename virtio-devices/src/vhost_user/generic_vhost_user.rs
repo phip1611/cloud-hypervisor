@@ -16,7 +16,10 @@ use vhost::vhost_user::{FrontendReqHandler, VhostUserFrontend, VhostUserFrontend
 use vm_device::UserspaceMapping;
 use vm_memory::GuestMemoryAtomic;
 use vm_migration::protocol::MemoryRangeTable;
-use vm_migration::{Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable};
+use vm_migration::{
+    Migratable, MigrationLifecycleError, Pausable, PausableError, Snapshot, SnapshotError,
+    Snapshottable, Transportable,
+};
 use vmm_sys_util::eventfd::EventFd;
 
 use super::vu_common_ctrl::VhostUserHandle;
@@ -425,23 +428,23 @@ impl Snapshottable for GenericVhostUser {
 impl Transportable for GenericVhostUser {}
 
 impl Migratable for GenericVhostUser {
-    fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+    fn start_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.vu_common.start_dirty_log(&self.guest_memory)
     }
 
-    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.vu_common.stop_dirty_log()
     }
 
-    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigrationLifecycleError> {
         self.vu_common.dirty_log(&self.guest_memory)
     }
 
-    fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn start_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.vu_common.start_migration()
     }
 
-    fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn complete_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         self.vu_common.complete_migration()
     }
 }

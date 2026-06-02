@@ -107,7 +107,59 @@ impl PausableError {
 }
 
 #[derive(Error, Debug)]
-pub enum MigratableError {
+pub enum MigrationProtocolError {
+    #[error("Socket error")]
+    Socket(#[source] std::io::Error),
+}
+
+#[derive(Error, Debug)]
+pub enum MigrationLifecycleError {
+    #[error("Failed to start dirty logging for migratable component: {0}")]
+    StartDirtyLog(String),
+
+    #[error("Failed to stop dirty logging for migratable component: {0}")]
+    StopDirtyLog(String),
+
+    #[error("Failed to retrieve dirty ranges for migratable component: {0}")]
+    DirtyLog(String),
+
+    #[error("Failed to start migration for migratable component: {0}")]
+    StartMigration(String),
+
+    #[error("Failed to complete migration for migratable component: {0}")]
+    CompleteMigration(String),
+
+    #[error("Missing guest memory")]
+    MissingGuestMemory,
+
+    #[error("Missing guest memory region at {gpa:#x}")]
+    MissingGuestMemoryRegion { gpa: u64 },
+}
+
+impl MigrationLifecycleError {
+    pub fn start_dirty_log(source: impl std::fmt::Display) -> Self {
+        Self::StartDirtyLog(source.to_string())
+    }
+
+    pub fn stop_dirty_log(source: impl std::fmt::Display) -> Self {
+        Self::StopDirtyLog(source.to_string())
+    }
+
+    pub fn dirty_log(source: impl std::fmt::Display) -> Self {
+        Self::DirtyLog(source.to_string())
+    }
+
+    pub fn start_migration(source: impl std::fmt::Display) -> Self {
+        Self::StartMigration(source.to_string())
+    }
+
+    pub fn complete_migration(source: impl std::fmt::Display) -> Self {
+        Self::CompleteMigration(source.to_string())
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum MigrationSendError {
     #[error(transparent)]
     Pausable(#[from] PausableError),
 
@@ -117,32 +169,69 @@ pub enum MigratableError {
     #[error(transparent)]
     Restore(#[from] RestoreError),
 
-    #[error("Failed to send migratable component snapshot")]
-    MigrateSend(#[source] anyhow::Error),
+    #[error(transparent)]
+    Lifecycle(#[from] MigrationLifecycleError),
 
-    #[error("Failed to receive migratable component snapshot")]
-    MigrateReceive(#[source] anyhow::Error),
+    #[error(transparent)]
+    Protocol(#[from] MigrationProtocolError),
 
-    #[error("Socket error")]
-    MigrateSocket(#[source] std::io::Error),
+    #[error("Failed to send migratable component snapshot: {0}")]
+    Send(String),
 
-    #[error("Failed to start migration for migratable component")]
-    StartDirtyLog(#[source] anyhow::Error),
+    #[error("Failed to release a disk lock: {0}")]
+    Unlock(String),
 
-    #[error("Failed to stop migration for migratable component")]
-    StopDirtyLog(#[source] anyhow::Error),
+    #[error("Receiver rejected VM migration config")]
+    ConfigRejected,
 
-    #[error("Failed to retrieve dirty ranges for migratable component")]
-    DirtyLog(#[source] anyhow::Error),
+    #[error("Receiver rejected VM migration state")]
+    StateRejected,
 
-    #[error("Failed to start migration for migratable component")]
-    StartMigration(#[source] anyhow::Error),
+    #[error("Receiver rejected migration memory")]
+    MemoryRejected,
 
-    #[error("Failed to complete migration for migratable component")]
-    CompleteMigration(#[source] anyhow::Error),
+    #[error("Receiver rejected migration start")]
+    StartRejected,
 
-    #[error("Failed to release a disk lock")]
-    UnlockError(#[source] anyhow::Error),
+    #[error("Receiver rejected migration completion")]
+    CompletionRejected,
+}
+
+impl MigrationSendError {
+    pub fn send(source: impl std::fmt::Display) -> Self {
+        Self::Send(source.to_string())
+    }
+
+    pub fn unlock(source: impl std::fmt::Display) -> Self {
+        Self::Unlock(source.to_string())
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum MigrationReceiveError {
+    #[error(transparent)]
+    Pausable(#[from] PausableError),
+
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+
+    #[error(transparent)]
+    Restore(#[from] RestoreError),
+
+    #[error(transparent)]
+    Lifecycle(#[from] MigrationLifecycleError),
+
+    #[error(transparent)]
+    Protocol(#[from] MigrationProtocolError),
+
+    #[error("Failed to receive migratable component snapshot: {0}")]
+    Receive(String),
+}
+
+impl MigrationReceiveError {
+    pub fn receive(source: impl std::fmt::Display) -> Self {
+        Self::Receive(source.to_string())
+    }
 }
 
 /// A Pausable component can be paused and resumed.
@@ -289,7 +378,7 @@ pub trait Transportable: Pausable + Snapshottable {
         &self,
         _snapshot: &Snapshot,
         _destination_url: &str,
-    ) -> std::result::Result<(), MigratableError> {
+    ) -> std::result::Result<(), MigrationSendError> {
         Ok(())
     }
 
@@ -299,7 +388,7 @@ pub trait Transportable: Pausable + Snapshottable {
     ///
     /// * `source_url` - The source URL to fetch the snapshot from. This could be an HTTP
     ///   endpoint, a TCP address or a local file.
-    fn recv(&self, _source_url: &str) -> std::result::Result<Snapshot, MigratableError> {
+    fn recv(&self, _source_url: &str) -> std::result::Result<Snapshot, MigrationReceiveError> {
         Ok(Snapshot::default())
     }
 }
@@ -313,23 +402,23 @@ pub trait Transportable: Pausable + Snapshottable {
 /// Moreover a migratable component can be transported to a remote or local
 /// destination and thus must be Transportable.
 pub trait Migratable: Send + Pausable + Snapshottable + Transportable {
-    fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+    fn start_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         Ok(())
     }
 
-    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         Ok(())
     }
 
-    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigrationLifecycleError> {
         Ok(MemoryRangeTable::default())
     }
 
-    fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn start_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         Ok(())
     }
 
-    fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn complete_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         Ok(())
     }
 }

@@ -105,8 +105,8 @@ use vm_memory::{Address, GuestAddress, GuestMemoryRegion, GuestUsize, MmapRegion
 use vm_memory::{GuestAddressSpace, GuestMemory};
 use vm_migration::protocol::MemoryRangeTable;
 use vm_migration::{
-    Migratable, MigratableError, Pausable, PausableError, RestoreError, Snapshot, SnapshotData,
-    SnapshotError, Snapshottable, Transportable, snapshot_from_id, state_from_id,
+    Migratable, MigrationLifecycleError, Pausable, PausableError, RestoreError, Snapshot,
+    SnapshotData, SnapshotError, Snapshottable, Transportable, snapshot_from_id, state_from_id,
 };
 use vm_virtio::{AccessPlatform, VirtioDeviceType};
 use vmm_sys_util::eventfd::EventFd;
@@ -5730,7 +5730,7 @@ impl Snapshottable for DeviceManager {
 impl Transportable for DeviceManager {}
 
 impl Migratable for DeviceManager {
-    fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+    fn start_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         for (_, device_node) in self.device_tree.lock().unwrap().iter() {
             if let Some(migratable) = &device_node.migratable {
                 migratable.lock().unwrap().start_dirty_log()?;
@@ -5739,7 +5739,7 @@ impl Migratable for DeviceManager {
         Ok(())
     }
 
-    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         for (_, device_node) in self.device_tree.lock().unwrap().iter() {
             if let Some(migratable) = &device_node.migratable {
                 migratable.lock().unwrap().stop_dirty_log()?;
@@ -5748,7 +5748,7 @@ impl Migratable for DeviceManager {
         Ok(())
     }
 
-    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigrationLifecycleError> {
         let mut tables = Vec::new();
         for (_, device_node) in self.device_tree.lock().unwrap().iter() {
             if let Some(migratable) = &device_node.migratable {
@@ -5758,7 +5758,7 @@ impl Migratable for DeviceManager {
         Ok(MemoryRangeTable::new_from_tables(tables))
     }
 
-    fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn start_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         for (_, device_node) in self.device_tree.lock().unwrap().iter() {
             if let Some(migratable) = &device_node.migratable {
                 migratable.lock().unwrap().start_migration()?;
@@ -5767,7 +5767,7 @@ impl Migratable for DeviceManager {
         Ok(())
     }
 
-    fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
+    fn complete_migration(&mut self) -> std::result::Result<(), MigrationLifecycleError> {
         for (_, device_node) in self.device_tree.lock().unwrap().iter() {
             if let Some(migratable) = &device_node.migratable {
                 migratable.lock().unwrap().complete_migration()?;

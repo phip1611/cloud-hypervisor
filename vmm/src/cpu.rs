@@ -73,8 +73,8 @@ use vm_memory::ByteValued;
 use vm_memory::{Bytes, GuestAddressSpace};
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
 use vm_migration::{
-    Migratable, Pausable, PausableError, RestoreError, Snapshot, SnapshotData,
-    SnapshotError, Snapshottable, Transportable, snapshot_from_id,
+    Migratable, Pausable, PausableError, RestoreError, Snapshot, SnapshotData, SnapshotError,
+    Snapshottable, Transportable, snapshot_from_id,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{SIGRTMIN, register_signal_handler};
@@ -533,9 +533,7 @@ impl Vcpu {
         vm_ops: Option<Arc<dyn VmOps>>,
         #[cfg(target_arch = "x86_64")] cpu_vendor: CpuVendor,
     ) -> Result<Self> {
-        let vcpu = vm
-            .create_vcpu(apic_id, vm_ops)
-            .map_err(Error::VcpuCreate)?;
+        let vcpu = vm.create_vcpu(apic_id, vm_ops).map_err(Error::VcpuCreate)?;
         // Initially the cpuid per vCPU is the one supported by this VM.
         Ok(Vcpu {
             vcpu,
@@ -2986,7 +2984,7 @@ impl CpuElf64Writable for CpuManager {
                 .unwrap()
                 .vcpu
                 .get_regs()
-                .map_err(|_e| GuestDebuggableError::Coredump(anyhow!("get regs failed")))?;
+                .map_err(|_e| GuestDebuggableError::coredump("get regs failed"))?;
 
             let regs1 = [
                 gregs.get_r15(),
@@ -3014,7 +3012,7 @@ impl CpuElf64Writable for CpuManager {
                 .unwrap()
                 .vcpu
                 .get_sregs()
-                .map_err(|_e| GuestDebuggableError::Coredump(anyhow!("get sregs failed")))?;
+                .map_err(|_e| GuestDebuggableError::coredump("get sregs failed"))?;
 
             debug!(
                 "rip 0x{:x} rsp 0x{:x} gs 0x{:x} cs 0x{:x} ss 0x{:x} ds 0x{:x}",
@@ -3088,7 +3086,7 @@ impl CpuElf64Writable for CpuManager {
                 .unwrap()
                 .vcpu
                 .get_regs()
-                .map_err(|_e| GuestDebuggableError::Coredump(anyhow!("get regs failed")))?;
+                .map_err(|_e| GuestDebuggableError::coredump("get regs failed"))?;
 
             let regs1 = [
                 gregs.get_rax(),
@@ -3117,7 +3115,7 @@ impl CpuElf64Writable for CpuManager {
                 .unwrap()
                 .vcpu
                 .get_sregs()
-                .map_err(|_e| GuestDebuggableError::Coredump(anyhow!("get sregs failed")))?;
+                .map_err(|_e| GuestDebuggableError::coredump("get sregs failed"))?;
 
             let mut msrs = vec![MsrEntry {
                 index: msr_index::MSR_KERNEL_GS_BASE,
@@ -3129,7 +3127,7 @@ impl CpuElf64Writable for CpuManager {
                 .unwrap()
                 .vcpu
                 .get_msrs(&mut msrs)
-                .map_err(|_e| GuestDebuggableError::Coredump(anyhow!("get msr failed")))?;
+                .map_err(|_e| GuestDebuggableError::coredump("get msr failed"))?;
             let kernel_gs_base = msrs[0].data;
 
             let cs = CpuSegment::new(sregs.cs);

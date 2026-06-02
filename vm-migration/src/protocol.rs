@@ -80,7 +80,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use vm_memory::ByteValued;
 
-use crate::MigratableError;
+use crate::MigrationProtocolError;
 use crate::bitpos_iterator::BitposIteratorExt;
 
 /// The commands of the [live-migration protocol].
@@ -188,17 +188,17 @@ impl Request {
         self.length
     }
 
-    pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigratableError> {
+    pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigrationProtocolError> {
         let mut request = Request::default();
         fd.read_exact(Self::as_mut_slice(&mut request))
-            .map_err(MigratableError::MigrateSocket)?;
+            .map_err(MigrationProtocolError::Socket)?;
 
         Ok(request)
     }
 
-    pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
+    pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigrationProtocolError> {
         fd.write_all(Self::as_slice(self))
-            .map_err(MigratableError::MigrateSocket)
+            .map_err(MigrationProtocolError::Socket)
     }
 }
 
@@ -247,33 +247,30 @@ impl Response {
         self.length
     }
 
-    pub fn read_from(fd: &mut dyn Read) -> Result<Response, MigratableError> {
+    pub fn read_from(fd: &mut dyn Read) -> Result<Response, MigrationProtocolError> {
         let mut response = Response::default();
         fd.read_exact(Self::as_mut_slice(&mut response))
-            .map_err(MigratableError::MigrateSocket)?;
+            .map_err(MigrationProtocolError::Socket)?;
 
         Ok(response)
     }
 
-    pub fn ok_or_abandon<T>(
-        self,
-        fd: &mut T,
-        error: MigratableError,
-    ) -> Result<Response, MigratableError>
+    pub fn ok_or_abandon<T, E>(self, fd: &mut T, error: E) -> Result<Response, E>
     where
         T: Read + Write,
+        E: From<MigrationProtocolError>,
     {
         if self.status != Status::Ok {
-            Request::abandon().write_to(fd)?;
-            Response::read_from(fd)?;
+            Request::abandon().write_to(fd).map_err(E::from)?;
+            Response::read_from(fd).map_err(E::from)?;
             return Err(error);
         }
         Ok(self)
     }
 
-    pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
+    pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigrationProtocolError> {
         fd.write_all(Self::as_slice(self))
-            .map_err(MigratableError::MigrateSocket)
+            .map_err(MigrationProtocolError::Socket)
     }
 }
 
@@ -428,7 +425,10 @@ impl MemoryRangeTable {
         self.data.push(range);
     }
 
-    pub fn read_from(fd: &mut dyn Read, length: u64) -> Result<MemoryRangeTable, MigratableError> {
+    pub fn read_from(
+        fd: &mut dyn Read,
+        length: u64,
+    ) -> Result<MemoryRangeTable, MigrationProtocolError> {
         assert!((length as usize).is_multiple_of(size_of::<MemoryRange>()));
 
         let mut data: Vec<MemoryRange> =
@@ -443,7 +443,7 @@ impl MemoryRangeTable {
             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr().cast(), length as usize) };
 
         fd.read_exact(data_slice_bytes)
-            .map_err(MigratableError::MigrateSocket)?;
+            .map_err(MigrationProtocolError::Socket)?;
 
         Ok(Self { data })
     }
@@ -452,12 +452,12 @@ impl MemoryRangeTable {
         (std::mem::size_of::<MemoryRange>() * self.data.len()) as u64
     }
 
-    pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
+    pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigrationProtocolError> {
         // SAFETY: the slice is constructed with the correct arguments
         fd.write_all(unsafe {
             std::slice::from_raw_parts(self.data.as_ptr().cast(), self.length() as usize)
         })
-        .map_err(MigratableError::MigrateSocket)
+        .map_err(MigrationProtocolError::Socket)
     }
 
     pub fn is_empty(&self) -> bool {

@@ -51,11 +51,10 @@ use std::sync::mpsc::Receiver;
 use std::thread;
 use std::thread::JoinHandle;
 
-use anyhow::anyhow;
 use event_monitor::event;
 use log::{debug, error, warn};
 use seccompiler::{BpfProgram, apply_filter};
-use vm_migration::MigratableError;
+use vm_migration::MigrationSendError;
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::Vmm;
@@ -128,18 +127,18 @@ pub struct MigrationWorker {
 }
 
 impl MigrationWorker {
-    fn apply_seccomp_filters(&self) -> Result<(), MigratableError> {
+    fn apply_seccomp_filters(&self) -> Result<(), MigrationSendError> {
         if self.seccomp_filter.is_empty() {
             return Ok(());
         }
 
         apply_filter(&self.seccomp_filter).map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error applying migration seccomp filter: {e}"))
+            MigrationSendError::send(format!("Error applying migration seccomp filter: {e}"))
         })
     }
 
     /// Run the actual migration logic.
-    fn run_inner(&self, vm: &mut Vm) -> Result<(), MigratableError> {
+    fn run_inner(&self, vm: &mut Vm) -> Result<(), MigrationSendError> {
         event!("vm", "migration-started");
 
         Vmm::send_migration(
@@ -259,7 +258,7 @@ pub struct MigrationThreadOut {
     /// the VMM.
     pub vm: Vm,
     /// The result of [`Vmm::send_migration`].
-    pub migration_res: Result<(), MigratableError>,
+    pub migration_res: Result<(), MigrationSendError>,
     /// The initial VM state (paused or running).
     pub initial_vm_state: VmState,
 }

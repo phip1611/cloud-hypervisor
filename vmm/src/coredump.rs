@@ -36,14 +36,20 @@ pub struct DumpState {
 
 #[derive(Error, Debug)]
 pub enum GuestDebuggableError {
-    #[error("coredump")]
-    Coredump(#[source] anyhow::Error),
+    #[error("coredump: {0}")]
+    Coredump(String),
     #[error("coredump file")]
     CoredumpFile(#[source] std::io::Error),
     #[error("Failed to pause")]
     Pause(#[source] vm_migration::PausableError),
     #[error("Failed to resume")]
     Resume(#[source] vm_migration::PausableError),
+}
+
+impl GuestDebuggableError {
+    pub fn coredump(source: impl std::fmt::Display) -> Self {
+        Self::Coredump(source.to_string())
+    }
 }
 
 pub trait GuestDebuggable: vm_migration::Pausable {

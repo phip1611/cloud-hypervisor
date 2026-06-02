@@ -38,8 +38,8 @@ use vm_memory::GuestMemoryAtomic;
 use vm_memory::bitmap::AtomicBitmap;
 use vm_migration::protocol::*;
 use vm_migration::{
-    MemoryMigrationContext, Migratable, MigratableError, OngoingMigrationContext, Pausable,
-    Snapshot, Snapshottable, Transportable,
+    MemoryMigrationContext, Migratable, MigrationProtocolError, MigrationReceiveError,
+    MigrationSendError, OngoingMigrationContext, Pausable, Snapshot, Snapshottable, Transportable,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
@@ -927,17 +927,17 @@ impl Vmm {
     /// Try to receive a file descriptor from a socket. Returns the slot number and the file descriptor.
     fn vm_receive_memory_fd(
         socket: &mut SocketStream,
-    ) -> std::result::Result<(u32, File), MigratableError> {
+    ) -> std::result::Result<(u32, File), MigrationReceiveError> {
         if let SocketStream::Unix(unix_socket) = socket {
             let mut buf = [0u8; 4];
             let (_, file) = unix_socket.recv_with_fd(&mut buf).map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error receiving slot from socket: {e}"))
+                MigrationReceiveError::receive(anyhow!("Error receiving slot from socket: {e}"))
             })?;
 
-            file.ok_or_else(|| MigratableError::MigrateReceive(anyhow!("Failed to receive socket")))
+            file.ok_or_else(|| MigrationReceiveError::receive(anyhow!("Failed to receive socket")))
                 .map(|file| (u32::from_le_bytes(buf), file))
         } else {
-            Err(MigratableError::MigrateReceive(anyhow!(
+            Err(MigrationReceiveError::receive(anyhow!(
                 "Unsupported socket type"
             )))
         }
@@ -954,43 +954,46 @@ impl Vmm {
         state: ReceiveMigrationState,
         req: &Request,
         _receive_data_migration: &VmReceiveMigrationData,
-    ) -> std::result::Result<ReceiveMigrationState, MigratableError> {
+    ) -> std::result::Result<ReceiveMigrationState, MigrationReceiveError> {
         use ReceiveMigrationState::*;
 
         let invalid_command = |state: &str, cmd: Command| {
-            Err(MigratableError::MigrateReceive(anyhow!(
+            Err(MigrationReceiveError::receive(anyhow!(
                 "Can't handle command {cmd:?} in current receive state {state}"
             )))
         };
 
-        let mut configure_vm =
-            |socket: &mut SocketStream,
-             memory_files: HashMap<u32, File>|
-             -> std::result::Result<ReceiveMigrationConfiguredData, MigratableError> {
-                let memory_manager = self.vm_receive_config(req, socket, memory_files)?;
-                let guest_memory = memory_manager.lock().unwrap().guest_memory();
-                // Create the additional-connection receiver even in the single-connection case.
-                // At this point the receiver does not know whether the sender will use extra TCP
-                // connections. If it does not, no worker connections are accepted and memory
-                // requests continue to arrive on the main connection.
-                let connections = listener.try_clone().and_then(|l| {
-                    ReceiveAdditionalConnections::new(l, guest_memory.clone(), &self.seccomp_action)
-                })?;
-                Ok(ReceiveMigrationConfiguredData {
-                    memory_manager,
-                    guest_memory,
-                    connections,
-                })
-            };
-
-        let recv_memory_fd = |socket: &mut SocketStream,
-                              mut memory_files: Vec<(u32, File)>|
-         -> std::result::Result<Vec<(u32, File)>, MigratableError> {
-            let (slot, file) = Self::vm_receive_memory_fd(socket)?;
-
-            memory_files.push((slot, file));
-            Ok(memory_files)
+        let mut configure_vm = |socket: &mut SocketStream,
+                                memory_files: HashMap<u32, File>|
+         -> std::result::Result<
+            ReceiveMigrationConfiguredData,
+            MigrationReceiveError,
+        > {
+            let memory_manager = self.vm_receive_config(req, socket, memory_files)?;
+            let guest_memory = memory_manager.lock().unwrap().guest_memory();
+            // Create the additional-connection receiver even in the single-connection case.
+            // At this point the receiver does not know whether the sender will use extra TCP
+            // connections. If it does not, no worker connections are accepted and memory
+            // requests continue to arrive on the main connection.
+            let connections = listener.try_clone().and_then(|l| {
+                ReceiveAdditionalConnections::new(l, guest_memory.clone(), &self.seccomp_action)
+            })?;
+            Ok(ReceiveMigrationConfiguredData {
+                memory_manager,
+                guest_memory,
+                connections,
+            })
         };
+
+        let recv_memory_fd =
+            |socket: &mut SocketStream,
+             mut memory_files: Vec<(u32, File)>|
+             -> std::result::Result<Vec<(u32, File)>, MigrationReceiveError> {
+                let (slot, file) = Self::vm_receive_memory_fd(socket)?;
+
+                memory_files.push((slot, file));
+                Ok(memory_files)
+            };
 
         if req.command() == Command::Abandon {
             info!("Abandon Command Received");
@@ -1092,7 +1095,7 @@ impl Vmm {
         req: &Request,
         socket: &mut T,
         existing_memory_files: HashMap<u32, File>,
-    ) -> std::result::Result<Arc<Mutex<MemoryManager>>, MigratableError>
+    ) -> std::result::Result<Arc<Mutex<MemoryManager>>, MigrationReceiveError>
     where
         T: Read,
     {
@@ -1101,23 +1104,24 @@ impl Vmm {
         data.resize_with(req.length() as usize, Default::default);
         socket
             .read_exact(&mut data)
-            .map_err(MigratableError::MigrateSocket)?;
+            .map_err(MigrationProtocolError::Socket)?;
 
         let vm_migration_config: VmMigrationConfig =
             serde_json::from_slice(&data).map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error deserialising config: {e}"))
+                MigrationReceiveError::receive(anyhow!("Error deserialising config: {e}"))
             })?;
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         self.vm_check_cpuid_compatibility(
             &vm_migration_config.vm_config,
             &vm_migration_config.common_cpuid,
-        )?;
+        )
+        .map_err(MigrationReceiveError::receive)?;
 
         let config = vm_migration_config.vm_config.clone();
         self.vm_config = Some(vm_migration_config.vm_config);
         self.console_info = Some(pre_create_console_devices(self).map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error creating console devices: {e:?}"))
+            MigrationReceiveError::receive(anyhow!("Error creating console devices: {e:?}"))
         })?);
 
         if self
@@ -1130,7 +1134,7 @@ impl Vmm {
         {
             let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
             apply_landlock(&mut config).map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error applying landlock: {e:?}"))
+                MigrationReceiveError::receive(anyhow!("Error applying landlock: {e:?}"))
             })?;
         }
 
@@ -1139,7 +1143,7 @@ impl Vmm {
             (&*self.vm_config.as_ref().unwrap().lock().unwrap()).into(),
         )
         .map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!(
+            MigrationReceiveError::receive(anyhow!(
                 "Error creating hypervisor VM from snapshot: {e:?}"
             ))
         })?;
@@ -1165,7 +1169,7 @@ impl Vmm {
             existing_memory_files,
         )
         .map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!(
+            MigrationReceiveError::receive(anyhow!(
                 "Error creating MemoryManager from snapshot: {e:?}"
             ))
         })?;
@@ -1186,7 +1190,7 @@ impl Vmm {
             Duration, /* state receive + deserialize */
             Duration, /* restoring */
         ),
-        MigratableError,
+        MigrationReceiveError,
     >
     where
         T: Read,
@@ -1196,27 +1200,27 @@ impl Vmm {
             data.resize_with(req.length() as usize, Default::default);
             socket
                 .read_exact(&mut data)
-                .map_err(MigratableError::MigrateSocket)?;
+                .map_err(MigrationProtocolError::Socket)?;
             serde_json::from_slice(&data).map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error deserialising snapshot: {e}"))
+                MigrationReceiveError::receive(anyhow!("Error deserialising snapshot: {e}"))
             })
         })?;
 
         let exit_evt = self.exit_evt.try_clone().map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error cloning exit EventFd: {e}"))
+            MigrationReceiveError::receive(anyhow!("Error cloning exit EventFd: {e}"))
         })?;
         let reset_evt = self.reset_evt.try_clone().map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error cloning reset EventFd: {e}"))
+            MigrationReceiveError::receive(anyhow!("Error cloning reset EventFd: {e}"))
         })?;
         let guest_exit_evt = self.guest_exit_evt.try_clone().map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error cloning guest exit EventFd: {e}"))
+            MigrationReceiveError::receive(anyhow!("Error cloning guest exit EventFd: {e}"))
         })?;
         #[cfg(feature = "guest_debug")]
         let debug_evt = self.vm_debug_evt.try_clone().map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error cloning debug EventFd: {e}"))
+            MigrationReceiveError::receive(anyhow!("Error cloning debug EventFd: {e}"))
         })?;
         let activate_evt = self.activate_evt.try_clone().map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error cloning activate EventFd: {e}"))
+            MigrationReceiveError::receive(anyhow!("Error cloning activate EventFd: {e}"))
         })?;
 
         let (vm, restore_duration) = measure_ok(|| {
@@ -1246,15 +1250,15 @@ impl Vmm {
                 None,
             )
             .map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error creating VM from snapshot: {e:?}"))
+                MigrationReceiveError::receive(anyhow!("Error creating VM from snapshot: {e:?}"))
             })?;
 
             // Create VM
             vm.restore().map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Failed restoring the Vm: {e}"))
+                MigrationReceiveError::receive(anyhow!("Failed restoring the Vm: {e}"))
             })?;
 
-            Ok::<Vm, MigratableError>(vm)
+            Ok::<Vm, MigrationReceiveError>(vm)
         })?;
 
         self.vm = VmOwnership::Vmm(vm);
@@ -1272,9 +1276,9 @@ impl Vmm {
         vm: &mut Vm,
         socket: &mut SocketStream,
         ctx: &mut MemoryMigrationContext,
-        is_converged: impl Fn(&MemoryMigrationContext) -> result::Result<bool, MigratableError>,
+        is_converged: impl Fn(&MemoryMigrationContext) -> result::Result<bool, MigrationSendError>,
         mem_send: &mut SendAdditionalConnections,
-    ) -> result::Result<MemoryRangeTable /* remaining */, MigratableError> {
+    ) -> result::Result<MemoryRangeTable /* remaining */, MigrationSendError> {
         loop {
             let iteration_begin = Instant::now();
 
@@ -1332,7 +1336,7 @@ impl Vmm {
     ///    - [`TimeoutStrategy::Cancel`] – returns
     ///    - [`TimeoutStrategy::Ignore`] – the migration completes despite not
     ///      meeting the downtime budget.
-    ///      [`MigratableError::MigrateSend`] so the caller can abort the
+    ///      [`MigrationSendError::send`] so the caller can abort the
     ///      migration cleanly.
     ///
     /// # Returns
@@ -1346,7 +1350,7 @@ impl Vmm {
     fn is_precopy_converged(
         ctx: &MemoryMigrationContext,
         send_data_migration: &VmSendMigrationData,
-    ) -> result::Result<bool, MigratableError> {
+    ) -> result::Result<bool, MigrationSendError> {
         if ctx.current_iteration_total_bytes == 0 {
             debug!("Precopy: No more memory to transfer");
             return Ok(true);
@@ -1384,7 +1388,7 @@ impl Vmm {
                         "Precopy: Timeout reached: {}s: migration didn't converge in time",
                         send_data_migration.timeout().as_secs()
                     );
-                    Err(MigratableError::MigrateSend(anyhow!("{msg}")))
+                    Err(MigrationSendError::send(anyhow!("{msg}")))
                 }
                 TimeoutStrategy::Ignore => {
                     info!(
@@ -1420,7 +1424,7 @@ impl Vmm {
         send_data_migration: &VmSendMigrationData,
         mem_send: &mut SendAdditionalConnections,
         ctx: &mut OngoingMigrationContext,
-    ) -> result::Result<(), MigratableError> {
+    ) -> result::Result<(), MigrationSendError> {
         let mut mem_ctx = MemoryMigrationContext::new();
 
         vm.start_dirty_log()?;
@@ -1471,7 +1475,7 @@ impl Vmm {
         send_data_migration: &VmSendMigrationData,
         initial_vm_state: VmState,
         tcp_worker_seccomp_filter: &BpfProgram,
-    ) -> result::Result<(), MigratableError> {
+    ) -> result::Result<(), MigrationSendError> {
         // State machine that is updated with more context as we progress.
         let mut ctx = OngoingMigrationContext::new();
 
@@ -1482,7 +1486,7 @@ impl Vmm {
         transport::send_request_expect_ok(
             &mut socket,
             Request::start(),
-            MigratableError::MigrateSend(anyhow!("Error starting migration")),
+            MigrationSendError::send(anyhow!("Error starting migration")),
         )?;
 
         // Send config
@@ -1491,7 +1495,7 @@ impl Vmm {
         let common_cpuid = {
             #[cfg(feature = "tdx")]
             if vm_config.lock().unwrap().is_tdx_enabled() {
-                return Err(MigratableError::MigrateSend(anyhow!(
+                return Err(MigrationSendError::send(anyhow!(
                     "Live Migration is not supported when TDX is enabled"
                 )));
             }
@@ -1520,7 +1524,7 @@ impl Vmm {
                 },
             )
             .map_err(|e| {
-                MigratableError::MigrateSend(anyhow!("Error generating common cpuid': {e:?}"))
+                MigrationSendError::send(anyhow!("Error generating common cpuid': {e:?}"))
             })?
         };
 
@@ -1531,9 +1535,9 @@ impl Vmm {
                     vm.send_memory_fds(unix_socket)?;
                 }
                 SocketStream::Tcp(_tcp_socket) => {
-                    return Err(MigratableError::MigrateSend(anyhow!(
+                    return Err(MigrationSendError::send(
                         "--local option is not supported with TCP sockets",
-                    )));
+                    ));
                 }
             }
         }
@@ -1590,7 +1594,7 @@ impl Vmm {
         // We release the locks early to enable locking them on the destination host.
         // The VM is already stopped.
         vm.release_disk_locks()
-            .map_err(|e| MigratableError::UnlockError(anyhow!("{e}")))?;
+            .map_err(|e| MigrationSendError::unlock(anyhow!("{e}")))?;
 
         // Capture snapshot and send it
         let (vm_snapshot, snapshot_duration) = measure_ok(|| vm.snapshot())?;
@@ -1610,7 +1614,7 @@ impl Vmm {
             transport::send_request_expect_ok(
                 &mut socket,
                 complete_req,
-                MigratableError::MigrateSend(anyhow!("Error completing migration")),
+                MigrationSendError::send(anyhow!("Error completing migration")),
             )
         })?;
 
@@ -1632,7 +1636,7 @@ impl Vmm {
         }
 
         // Let every Migratable object know about the migration being complete
-        vm.complete_migration()
+        Ok(vm.complete_migration()?)
     }
 
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -1640,12 +1644,10 @@ impl Vmm {
         &self,
         src_vm_config: &Arc<Mutex<VmConfig>>,
         src_vm_cpuid: &[hypervisor::arch::x86::CpuIdEntry],
-    ) -> result::Result<(), MigratableError> {
+    ) -> result::Result<(), String> {
         #[cfg(feature = "tdx")]
         if src_vm_config.lock().unwrap().is_tdx_enabled() {
-            return Err(MigratableError::MigrateReceive(anyhow!(
-                "Live Migration is not supported when TDX is enabled"
-            )));
+            return Err("Live Migration is not supported when TDX is enabled".to_owned());
         }
 
         // We check the `CPUID` compatibility of between the source vm and destination, which is
@@ -1658,7 +1660,7 @@ impl Vmm {
                 // as this affects what Hypervisor::get_supported_cpuid returns.
                 self.hypervisor
                     .enable_amx_state_components()
-                    .map_err(|e| MigratableError::MigrateReceive(e.into()))?;
+                    .map_err(|e| e.to_string())?;
             }
 
             let phys_bits =
@@ -1675,15 +1677,10 @@ impl Vmm {
                     profile: vm_config.cpus.profile,
                 },
             )
-            .map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error generating common cpuid: {e:?}"))
-            })?
+            .map_err(|e| format!("Error generating common cpuid: {e:?}"))?
         };
-        arch::CpuidFeatureEntry::check_cpuid_compatibility(src_vm_cpuid, dest_cpuid).map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!(
-                "Error checking cpu feature compatibility': {e:?}"
-            ))
-        })
+        arch::CpuidFeatureEntry::check_cpuid_compatibility(src_vm_cpuid, dest_cpuid)
+            .map_err(|e| format!("Error checking cpu feature compatibility': {e:?}"))
     }
 
     fn vm_restore(
@@ -1703,7 +1700,7 @@ impl Vmm {
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         self.vm_check_cpuid_compatibility(&vm_config, &vm_snapshot.common_cpuid)
-            .map_err(VmError::Restore)?;
+            .map_err(|e| VmError::Restore(vm_migration::RestoreError::restore(e)))?;
 
         self.vm_config = Some(Arc::clone(&vm_config));
 
@@ -2661,16 +2658,16 @@ impl RequestHandler for Vmm {
     fn vm_receive_migration(
         &mut self,
         receive_data_migration: VmReceiveMigrationData,
-    ) -> result::Result<(), MigratableError> {
+    ) -> result::Result<(), MigrationReceiveError> {
         if self
             .vm
             .vm_mut_or_none()
             .map_err(|_| {
-                MigratableError::MigrateReceive(anyhow!("There is already an ongoing migration"))
+                MigrationReceiveError::receive(anyhow!("There is already an ongoing migration"))
             })?
             .is_some()
         {
-            return Err(MigratableError::MigrateReceive(anyhow!(
+            return Err(MigrationReceiveError::receive(anyhow!(
                 "Can't receive a migration when a VM is created"
             )));
         }
@@ -2742,22 +2739,22 @@ impl RequestHandler for Vmm {
     fn vm_send_migration(
         &mut self,
         send_data_migration: VmSendMigrationData,
-    ) -> result::Result<(), MigratableError> {
+    ) -> result::Result<(), MigrationSendError> {
         if self
             .vm
             .vm_mut_or_none()
             .map_err(|_| {
-                MigratableError::MigrateSend(anyhow!("There is already an ongoing migration"))
+                MigrationSendError::send(anyhow!("There is already an ongoing migration"))
             })?
             .is_none()
         {
-            return Err(MigratableError::MigrateSend(anyhow!("VM is not running")));
+            return Err(MigrationSendError::send(anyhow!("VM is not running")));
         }
 
         send_data_migration
             .validate()
             .context("Invalid send migration configuration")
-            .map_err(MigratableError::MigrateSend)?;
+            .map_err(MigrationSendError::send)?;
 
         info!(
             "Sending migration: destination_url={},local={},downtime={}ms,timeout={}s,timeout_strategy={:?}",
@@ -2777,7 +2774,7 @@ impl RequestHandler for Vmm {
             .backed_by_shared_memory()
             && send_data_migration.local
         {
-            return Err(MigratableError::MigrateSend(anyhow!(
+            return Err(MigrationSendError::send(anyhow!(
                 "Local migration requires shared memory or hugepages enabled"
             )));
         }
@@ -2789,7 +2786,7 @@ impl RequestHandler for Vmm {
 
         let initial_vm_state = vm.get_state();
         if initial_vm_state != VmState::Running && initial_vm_state != VmState::Paused {
-            return Err(MigratableError::MigrateSend(anyhow!(
+            return Err(MigrationSendError::send(anyhow!(
                 "VM is not running or paused: {initial_vm_state:?}"
             )));
         }
@@ -2800,19 +2797,19 @@ impl RequestHandler for Vmm {
             None,
         )
         .map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error creating migration seccomp filter: {e}"))
+            MigrationSendError::send(anyhow!("Error creating migration seccomp filter: {e}"))
         })?;
         let migration_tcp_worker_seccomp_filter =
             get_seccomp_filter(&self.seccomp_action, Thread::MigrationTcpWorker, None).map_err(
                 |e| {
-                    MigratableError::MigrateSend(anyhow!(
+                    MigrationSendError::send(anyhow!(
                         "Error creating migration TCP worker seccomp filter: {e}"
                     ))
                 },
             )?;
 
         let vm_info_snapshot = self.vm_info().map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Failed to query VM info snapshot: {e}"))
+            MigrationSendError::send(anyhow!("Failed to query VM info snapshot: {e}"))
         })?;
 
         // Take VM ownership. This also means that API events can no longer
@@ -2845,7 +2842,7 @@ impl RequestHandler for Vmm {
             }
             Err(e) => {
                 self.vm = VmOwnership::Vmm(e.vm);
-                Err(MigratableError::MigrateSend(e.spawn_error.into()))
+                Err(MigrationSendError::send(e.spawn_error))
             }
         }
     }
