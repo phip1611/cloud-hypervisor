@@ -54,7 +54,7 @@ use hypervisor::arch::x86::SpecialRegisters;
 use hypervisor::arch::x86::msr_index;
 #[cfg(feature = "tdx")]
 use hypervisor::kvm::{TdxExitDetails, TdxExitStatus};
-use hypervisor::{CpuState, HypervisorCpuError, VmExit, VmOps};
+use hypervisor::{CpuState, HypervisorCpuError, HypervisorVmError, VmExit, VmOps};
 use libc::{c_void, siginfo_t};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use linux_loader::elf::Elf64_Nhdr;
@@ -119,10 +119,10 @@ pub const CPU_MANAGER_ACPI_SIZE: usize = 0xc;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Error creating vCPU")]
-    VcpuCreate(#[source] anyhow::Error),
+    VcpuCreate(#[source] HypervisorVmError),
 
     #[error("Error running vCPU")]
-    VcpuRun(#[source] anyhow::Error),
+    VcpuRun(#[source] HypervisorCpuError),
 
     #[error("Error spawning vCPU thread")]
     VcpuSpawn(#[source] io::Error),
@@ -181,8 +181,11 @@ pub enum Error {
     #[error("Cannot apply seccomp filter")]
     ApplySeccompFilter(#[source] seccompiler::Error),
 
-    #[error("Error starting vCPU after restore")]
-    StartRestoreVcpu(#[source] anyhow::Error),
+    #[error("Error restoring vCPU state from snapshot")]
+    RestoreVcpuStateFromSnapshot(#[source] MigratableError),
+
+    #[error("Error setting restored vCPU state")]
+    RestoreVcpuState(#[source] HypervisorCpuError),
 
     #[error("Unexpected VmExit")]
     UnexpectedVmExit,
@@ -204,11 +207,19 @@ pub enum Error {
 
     #[cfg(feature = "guest_debug")]
     #[error("Error translating virtual address")]
-    TranslateVirtualAddress(#[source] anyhow::Error),
+    TranslateVirtualAddress(#[source] HypervisorCpuError),
+
+    #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
+    #[error("Unsupported physical address range: {pa_range}")]
+    UnsupportedPhysicalAddressRange { pa_range: u64 },
+
+    #[cfg(feature = "guest_debug")]
+    #[error("Error reading guest memory during address translation")]
+    TranslateVirtualAddressMemory(#[source] vm_memory::GuestMemoryError),
 
     #[cfg(target_arch = "x86_64")]
     #[error("Error setting up AMX")]
-    AmxEnable(#[source] anyhow::Error),
+    AmxEnable(#[source] hypervisor::HypervisorError),
 
     #[error("Maximum number of vCPUs {0} exceeds host limit {1}")]
     MaximumVcpusExceeded(u32, u32),
@@ -226,7 +237,7 @@ pub enum Error {
 
     #[cfg(feature = "mshv")]
     #[error("Failed to set partition property")]
-    SetPartitionProperty(#[source] anyhow::Error),
+    SetPartitionProperty(#[source] hypervisor::HypervisorError),
 
     #[error("Error enabling core scheduling")]
     CoreScheduling(#[source] io::Error),
@@ -525,7 +536,7 @@ impl Vcpu {
     ) -> Result<Self> {
         let vcpu = vm
             .create_vcpu(apic_id, vm_ops)
-            .map_err(|e| Error::VcpuCreate(e.into()))?;
+            .map_err(Error::VcpuCreate)?;
         // Initially the cpuid per vCPU is the one supported by this VM.
         Ok(Vcpu {
             vcpu,
@@ -886,7 +897,7 @@ impl CpuManager {
         if config.features.amx {
             hypervisor
                 .enable_amx_state_components()
-                .map_err(|e| Error::AmxEnable(e.into()))?;
+                .map_err(Error::AmxEnable)?;
         }
 
         let proximity_domain_per_cpu: BTreeMap<u32, u32> = {
@@ -996,9 +1007,9 @@ impl CpuManager {
         )?;
 
         if let Some(snapshot) = snapshot {
-            let state: CpuState = snapshot.to_state().map_err(|e| {
-                Error::VcpuCreate(anyhow!("Could not get vCPU state from snapshot {e:?}"))
-            })?;
+            let state: CpuState = snapshot
+                .to_state()
+                .map_err(Error::RestoreVcpuStateFromSnapshot)?;
 
             #[cfg(target_arch = "aarch64")]
             {
@@ -1014,7 +1025,7 @@ impl CpuManager {
 
             vcpu.vcpu
                 .set_state(&state)
-                .map_err(|e| Error::VcpuCreate(anyhow!("Could not set the vCPU state {e:?}")))?;
+                .map_err(Error::RestoreVcpuState)?;
 
             vcpu.saved_state = Some(state);
         }
@@ -1429,7 +1440,7 @@ impl CpuManager {
                                 },
 
                                 Err(e) => {
-                                    error!("VCPU generated error: {:?}", Error::VcpuRun(e.into()));
+                                    error!("VCPU generated error: {:?}", Error::VcpuRun(e));
                                     vcpu_run_interrupted.store(true, Ordering::SeqCst);
                                     exit_evt.write(1).unwrap();
                                     break;
@@ -1557,10 +1568,7 @@ impl CpuManager {
     }
 
     pub fn start_restored_vcpus(&mut self) -> Result<()> {
-        self.activate_vcpus(self.vcpus.len() as u32, false, Some(true))
-            .map_err(|e| {
-                Error::StartRestoreVcpu(anyhow!("Failed to start restored vCPUs: {e:#?}"))
-            })?;
+        self.activate_vcpus(self.vcpus.len() as u32, false, Some(true))?;
 
         Ok(())
     }
@@ -2052,7 +2060,7 @@ impl CpuManager {
             .unwrap()
             .vcpu
             .translate_gva(gva, /* flags: unused */ 0)
-            .map_err(|e| Error::TranslateVirtualAddress(e.into()))?;
+            .map_err(Error::TranslateVirtualAddress)?;
         Ok(gpa)
     }
 
@@ -2084,19 +2092,19 @@ impl CpuManager {
             .unwrap()
             .vcpu
             .get_sys_reg(TCR_EL1)
-            .map_err(|e| Error::TranslateVirtualAddress(e.into()))?;
+            .map_err(Error::TranslateVirtualAddress)?;
         let ttbr1_el1: u64 = self.vcpus[usize::from(cpu_id)]
             .lock()
             .unwrap()
             .vcpu
             .get_sys_reg(TTBR1_EL1)
-            .map_err(|e| Error::TranslateVirtualAddress(e.into()))?;
+            .map_err(Error::TranslateVirtualAddress)?;
         let id_aa64mmfr0_el1: u64 = self.vcpus[usize::from(cpu_id)]
             .lock()
             .unwrap()
             .vcpu
             .get_sys_reg(ID_AA64MMFR0_EL1)
-            .map_err(|e| Error::TranslateVirtualAddress(e.into()))?;
+            .map_err(Error::TranslateVirtualAddress)?;
 
         // Bit 55 of the VA determines the range, high (0xFFFxxx...)
         // or low (0x000xxx...).
@@ -2145,9 +2153,7 @@ impl CpuManager {
             5 => 48,
             6 => 52,
             _ => {
-                return Err(Error::TranslateVirtualAddress(anyhow!(format!(
-                    "PA range not supported {pa_range}"
-                ))));
+                return Err(Error::UnsupportedPhysicalAddressRange { pa_range });
             }
         };
 
@@ -2182,7 +2188,7 @@ impl CpuManager {
             guest_memory
                 .memory()
                 .read(&mut buf, GuestAddress(descaddr))
-                .map_err(|e| Error::TranslateVirtualAddress(e.into()))?;
+                .map_err(Error::TranslateVirtualAddressMemory)?;
             let descriptor = u64::from_le_bytes(buf);
 
             descaddr = descriptor & descaddrmask;
