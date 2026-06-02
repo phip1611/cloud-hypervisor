@@ -13,7 +13,7 @@ use thiserror::Error;
 use vm_device::interrupt::{
     InterruptIndex, InterruptSourceConfig, InterruptSourceGroup, MsiIrqSourceConfig,
 };
-use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable};
+use vm_migration::{Pausable, SnapshotError, Snapshot, Snapshottable};
 
 // MSI control masks
 const MSI_CTL_ENABLE: u16 = 0x1;
@@ -290,7 +290,7 @@ impl Snapshottable for MsiConfig {
         String::from(MSI_CONFIG_ID)
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         Snapshot::new_from_state(&self.state())
     }
 }

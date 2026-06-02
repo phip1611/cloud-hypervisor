@@ -14,7 +14,7 @@ use vm_device::interrupt::{
     LegacyIrqSourceConfig, MsiIrqGroupConfig,
 };
 use vm_memory::address::Address;
-use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 use super::interrupt_controller::{Error, InterruptController};
@@ -155,7 +155,7 @@ impl Snapshottable for Gic {
         GIC_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let vgic = self.vgic.as_ref().unwrap().clone();
         let state = vgic.lock().unwrap().state().unwrap();
         Snapshot::new_from_state(&state)

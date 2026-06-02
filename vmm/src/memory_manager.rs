@@ -45,8 +45,8 @@ use vm_memory::{
 };
 use vm_migration::protocol::{MemoryRange, MemoryRangeTable};
 use vm_migration::{
-    Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable, Transportable,
-    UffdError,
+    Migratable, MigratableError, Pausable, RestoreError, Snapshot, SnapshotData, SnapshotError,
+    Snapshottable, Transportable, UffdError,
 };
 use vmm_sys_util::eventfd::EventFd;
 
@@ -358,7 +358,7 @@ pub enum Error {
 
     /// Cannot restore VM
     #[error("Cannot restore VM")]
-    Restore(#[source] MigratableError),
+    Restore(#[source] RestoreError),
 
     /// Cannot restore VM because source URL is missing
     #[error("Cannot restore VM because source URL is missing")]
@@ -465,7 +465,7 @@ pub enum Error {
 
 impl From<UffdError> for Error {
     fn from(e: UffdError) -> Self {
-        Error::Restore(MigratableError::OnDemandRestore(e))
+        Error::Restore(RestoreError::OnDemandRestore(e))
     }
 }
 
@@ -1899,7 +1899,8 @@ impl MemoryManager {
         exit_evt: &EventFd,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         if let Some(source_url) = source_url {
-            let mut memory_file_path = url_to_path(source_url).map_err(Error::Restore)?;
+            let mut memory_file_path = url_to_path(source_url)
+                .map_err(|e| Error::Restore(RestoreError::restore(e)))?;
             memory_file_path.push(String::from(SNAPSHOT_FILENAME));
 
             let mem_snapshot: MemoryManagerSnapshotData =
@@ -3187,8 +3188,10 @@ impl Snapshottable for MemoryManager {
         MEMORY_MANAGER_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&mut self) -> result::Result<Snapshot, MigratableError> {
-        let memory_ranges = self.memory_range_table(true)?;
+    fn snapshot(&mut self) -> result::Result<Snapshot, SnapshotError> {
+        let memory_ranges = self
+            .memory_range_table(true)
+            .map_err(SnapshotError::snapshot)?;
 
         // Store locally this list of ranges as it will be used through the
         // Transportable::send() implementation. The point is to avoid the

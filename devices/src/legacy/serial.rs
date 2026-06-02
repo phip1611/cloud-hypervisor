@@ -12,7 +12,7 @@ use std::{io, result};
 use serde::{Deserialize, Serialize};
 use vm_device::BusDevice;
 use vm_device::interrupt::InterruptSourceGroup;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, Pausable, SnapshotError, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::errno::Result;
 
 const LOOP_SIZE: usize = 0x40;
@@ -330,7 +330,7 @@ impl Snapshottable for Serial {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         Snapshot::new_from_state(&self.state())
     }
 }

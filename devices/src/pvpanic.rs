@@ -20,7 +20,7 @@ use thiserror::Error;
 use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::{BusDevice, Resource};
 use vm_memory::{Address, GuestAddress};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, Pausable, SnapshotError, Snapshot, Snapshottable, Transportable};
 
 const PVPANIC_VENDOR_ID: u16 = 0x1b36;
 const PVPANIC_DEVICE_ID: u16 = 0x0011;
@@ -255,7 +255,7 @@ impl Snapshottable for PvPanicDevice {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let mut snapshot = Snapshot::new_from_state(&self.state())?;
 
         // Snapshot PciConfiguration

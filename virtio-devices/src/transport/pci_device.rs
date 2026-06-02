@@ -33,7 +33,7 @@ use vm_device::interrupt::{
 };
 use vm_device::{BusDevice, PciBarType, Resource};
 use vm_memory::{Address, ByteValued, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, Le32};
-use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable};
 use vm_virtio::AccessPlatform;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -1327,7 +1327,7 @@ impl Snapshottable for VirtioPciDevice {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let mut virtio_pci_dev_snapshot = Snapshot::new_from_state(&self.state())?;
 
         // Snapshot PciConfiguration

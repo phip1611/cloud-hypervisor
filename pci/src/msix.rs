@@ -14,7 +14,7 @@ use vm_device::interrupt::{
     InterruptIndex, InterruptSourceConfig, InterruptSourceGroup, MsiIrqSourceConfig,
 };
 use vm_memory::ByteValued;
-use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable};
+use vm_migration::{Pausable, SnapshotError, Snapshot, Snapshottable};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::{PciCapability, PciCapabilityId};
@@ -516,7 +516,7 @@ impl Snapshottable for MsixConfig {
         String::from(MSIX_CONFIG_ID)
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         Snapshot::new_from_state(&self.state())
     }
 }

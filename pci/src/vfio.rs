@@ -31,7 +31,7 @@ use vm_device::interrupt::{
 };
 use vm_device::{BusDevice, Resource};
 use vm_memory::{Address, GuestAddress, GuestAddressSpace, GuestMemory, GuestUsize};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, Pausable, SnapshotError, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::mmap::MmapRegion;
@@ -1450,7 +1450,7 @@ impl Snapshottable for VfioCommon {
         String::from(VFIO_COMMON_ID)
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let mut vfio_common_snapshot = Snapshot::new_from_state(&self.state())?;
 
         // Snapshot PciConfiguration
@@ -2081,7 +2081,7 @@ impl Snapshottable for VfioPciDevice {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let mut vfio_pci_dev_snapshot = Snapshot::default();
 
         // Snapshot VfioCommon

@@ -23,7 +23,6 @@ use std::{cmp, io, result, thread};
 
 use acpi_tables::sdt::Sdt;
 use acpi_tables::{Aml, aml};
-use anyhow::anyhow;
 #[cfg(target_arch = "x86_64")]
 use arch::x86_64::get_x2apic_id;
 use arch::{EntryPoint, NumaNodes};
@@ -74,8 +73,8 @@ use vm_memory::ByteValued;
 use vm_memory::{Bytes, GuestAddressSpace};
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
 use vm_migration::{
-    Migratable, MigratableError, Pausable, PausableError, Snapshot, SnapshotData, Snapshottable, Transportable,
-    snapshot_from_id,
+    Migratable, Pausable, PausableError, RestoreError, Snapshot, SnapshotData,
+    SnapshotError, Snapshottable, Transportable, snapshot_from_id,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{SIGRTMIN, register_signal_handler};
@@ -182,7 +181,7 @@ pub enum Error {
     ApplySeccompFilter(#[source] seccompiler::Error),
 
     #[error("Error restoring vCPU state from snapshot")]
-    RestoreVcpuStateFromSnapshot(#[source] MigratableError),
+    RestoreVcpuStateFromSnapshot(#[source] RestoreError),
 
     #[error("Error setting restored vCPU state")]
     RestoreVcpuState(#[source] HypervisorCpuError),
@@ -700,11 +699,11 @@ impl Snapshottable for Vcpu {
         self.id.to_string()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let saved_state = self
             .vcpu
             .state()
-            .map_err(|e| MigratableError::Snapshot(anyhow!("Could not get vCPU state {e:?}")))?;
+            .map_err(|e| SnapshotError::Snapshot(format!("Could not get vCPU state {e:?}")))?;
 
         self.saved_state = Some(saved_state.clone());
 
@@ -2694,7 +2693,7 @@ impl Snapshottable for CpuManager {
         CPU_MANAGER_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let mut cpu_manager_snapshot = Snapshot::default();
 
         // The CpuManager snapshot is a collection of all vCPUs snapshots.

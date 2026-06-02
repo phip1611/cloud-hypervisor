@@ -16,7 +16,7 @@ use vhost::vhost_user::{FrontendReqHandler, VhostUserFrontend, VhostUserFrontend
 use vm_device::UserspaceMapping;
 use vm_memory::GuestMemoryAtomic;
 use vm_migration::protocol::MemoryRangeTable;
-use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 use super::vu_common_ctrl::VhostUserHandle;
@@ -180,7 +180,7 @@ since the backend only supports {backend_num_queues}\n",
         })
     }
 
-    fn state(&self) -> std::result::Result<State, MigratableError> {
+    fn state(&self) -> std::result::Result<State, SnapshotError> {
         self.vu_common.state(())
     }
 
@@ -418,7 +418,7 @@ impl Snapshottable for GenericVhostUser {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         self.vu_common.snapshot(&self.state()?)
     }
 }

@@ -23,7 +23,7 @@ use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::{BusDevice, Resource, UserspaceMapping};
 use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::{Address, GuestAddress};
-use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable};
 
 const IVSHMEM_BAR0_IDX: usize = 0;
 const IVSHMEM_BAR1_IDX: usize = 1;
@@ -404,7 +404,7 @@ impl Snapshottable for IvshmemDevice {
 
     // The snapshot/restore (also live migration) support only work for ivshmem-plain mode.
     // Additional work is needed for supporting ivshmem-doorbell.
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let mut snapshot = Snapshot::new_from_state(&self.state())?;
 
         // Snapshot PciConfiguration

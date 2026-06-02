@@ -13,7 +13,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use virtio_queue::{Queue, QueueT};
-use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable};
+use vm_migration::{Pausable, SnapshotError, Snapshot, Snapshottable};
 
 use super::pci_device::VIRTQ_MSI_NO_VECTOR;
 use crate::VirtioDevice;
@@ -435,7 +435,7 @@ impl Snapshottable for VirtioPciCommonConfig {
         String::from(VIRTIO_PCI_COMMON_CONFIG_ID)
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         Snapshot::new_from_state(&self.state())
     }
 }

@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-use anyhow::anyhow;
 pub use context::{
     CompletedMigrationContext, DowntimeContext, MemoryMigrationContext, MigrationContextError,
     OngoingMigrationContext,
@@ -61,6 +60,42 @@ pub enum PausableError {
     DeviceDisconnected(String),
 }
 
+#[derive(Error, Debug)]
+pub enum SnapshotError {
+    #[error("Failed to serialize snapshot state")]
+    Serialize(#[source] serde_json::Error),
+
+    #[error("Failed to snapshot migratable component: {0}")]
+    Snapshot(String),
+}
+
+impl SnapshotError {
+    pub fn snapshot(source: impl std::fmt::Display) -> Self {
+        Self::Snapshot(source.to_string())
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum RestoreError {
+    #[error("Failed to deserialize snapshot state")]
+    Deserialize(#[source] serde_json::Error),
+
+    #[error("Missing snapshot data")]
+    MissingSnapshotData,
+
+    #[error("On-demand restore failed")]
+    OnDemandRestore(#[source] UffdError),
+
+    #[error("Failed to restore migratable component: {0}")]
+    Restore(String),
+}
+
+impl RestoreError {
+    pub fn restore(source: impl std::fmt::Display) -> Self {
+        Self::Restore(source.to_string())
+    }
+}
+
 impl PausableError {
     pub fn pause(source: impl std::fmt::Display) -> Self {
         Self::Pause(source.to_string())
@@ -76,20 +111,17 @@ pub enum MigratableError {
     #[error(transparent)]
     Pausable(#[from] PausableError),
 
-    #[error("Failed to snapshot migratable component")]
-    Snapshot(#[source] anyhow::Error),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
 
-    #[error("Failed to restore migratable component")]
-    Restore(#[source] anyhow::Error),
+    #[error(transparent)]
+    Restore(#[from] RestoreError),
 
     #[error("Failed to send migratable component snapshot")]
     MigrateSend(#[source] anyhow::Error),
 
     #[error("Failed to receive migratable component snapshot")]
     MigrateReceive(#[source] anyhow::Error),
-
-    #[error("On-demand restore failed")]
-    OnDemandRestore(#[source] UffdError),
 
     #[error("Socket error")]
     MigrateSocket(#[source] std::io::Error),
@@ -111,7 +143,6 @@ pub enum MigratableError {
 
     #[error("Failed to release a disk lock")]
     UnlockError(#[source] anyhow::Error),
-
 }
 
 /// A Pausable component can be paused and resumed.
@@ -140,21 +171,19 @@ pub struct SnapshotData {
 
 impl SnapshotData {
     /// Generate the state data from the snapshot data
-    pub fn to_state<'a, T>(&'a self) -> Result<T, MigratableError>
+    pub fn to_state<'a, T>(&'a self) -> Result<T, RestoreError>
     where
         T: Deserialize<'a>,
     {
-        serde_json::from_str(&self.state)
-            .map_err(|e| MigratableError::Restore(anyhow!("Error deserialising: {e}")))
+        serde_json::from_str(&self.state).map_err(RestoreError::Deserialize)
     }
 
     /// Create from state that can be serialized
-    pub fn new_from_state<T>(state: &T) -> Result<Self, MigratableError>
+    pub fn new_from_state<T>(state: &T) -> Result<Self, SnapshotError>
     where
         T: Serialize,
     {
-        let state = serde_json::to_string(state)
-            .map_err(|e| MigratableError::Snapshot(anyhow!("Error serialising: {e}")))?;
+        let state = serde_json::to_string(state).map_err(SnapshotError::Serialize)?;
 
         Ok(SnapshotData { state })
     }
@@ -192,7 +221,7 @@ impl Snapshot {
     }
 
     /// Create from state that can be serialized
-    pub fn new_from_state<T>(state: &T) -> Result<Self, MigratableError>
+    pub fn new_from_state<T>(state: &T) -> Result<Self, SnapshotError>
     where
         T: Serialize,
     {
@@ -205,13 +234,13 @@ impl Snapshot {
     }
 
     /// Generate the state data from the snapshot
-    pub fn to_state<'a, T>(&'a self) -> Result<T, MigratableError>
+    pub fn to_state<'a, T>(&'a self) -> Result<T, RestoreError>
     where
         T: Deserialize<'a>,
     {
         self.snapshot_data
             .as_ref()
-            .ok_or_else(|| MigratableError::Restore(anyhow!("Missing snapshot data")))?
+            .ok_or(RestoreError::MissingSnapshotData)?
             .to_state()
     }
 }
@@ -220,7 +249,7 @@ pub fn snapshot_from_id<'a>(snapshot: Option<&'a Snapshot>, id: &str) -> Option<
     snapshot.and_then(|s| s.snapshots.get(id))
 }
 
-pub fn state_from_id<'a, T>(s: Option<&'a Snapshot>, id: &str) -> Result<Option<T>, MigratableError>
+pub fn state_from_id<'a, T>(s: Option<&'a Snapshot>, id: &str) -> Result<Option<T>, RestoreError>
 where
     T: Deserialize<'a>,
 {
@@ -239,7 +268,7 @@ pub trait Snapshottable: Pausable {
     }
 
     /// Take a component snapshot.
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         Ok(Snapshot::default())
     }
 }

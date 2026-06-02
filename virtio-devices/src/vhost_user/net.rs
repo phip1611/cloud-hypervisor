@@ -20,7 +20,7 @@ use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use virtio_queue::QueueT;
 use vm_memory::{ByteValued, GuestMemoryAtomic};
 use vm_migration::protocol::MemoryRangeTable;
-use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::seccomp_filters::Thread;
@@ -228,7 +228,7 @@ impl Net {
         })
     }
 
-    fn state(&self) -> std::result::Result<State, MigratableError> {
+    fn state(&self) -> std::result::Result<State, SnapshotError> {
         self.vu_common.state(self.config)
     }
 }
@@ -415,7 +415,7 @@ impl Snapshottable for Net {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         self.vu_common.snapshot(&self.state()?)
     }
 }

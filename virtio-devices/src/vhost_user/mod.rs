@@ -23,7 +23,7 @@ use vm_memory::guest_memory::Error as MmapError;
 use vm_memory::mmap::MmapRegionError;
 use vm_memory::{Address, GuestAddressSpace, GuestMemory, GuestMemoryAtomic};
 use vm_migration::protocol::MemoryRangeTable;
-use vm_migration::{MigratableError, Pausable, PausableError, Snapshot};
+use vm_migration::{MigratableError, Pausable, PausableError, SnapshotError, Snapshot};
 use vmm_sys_util::eventfd::EventFd;
 use vu_common_ctrl::VhostUserHandle;
 
@@ -733,7 +733,7 @@ impl VhostUserCommon {
     pub fn state<C: Default>(
         &self,
         config: C,
-    ) -> std::result::Result<VhostUserState<C>, MigratableError> {
+    ) -> std::result::Result<VhostUserState<C>, SnapshotError> {
         let mut state = VhostUserState {
             avail_features: self.virtio_common.avail_features,
             acked_features: self.virtio_common.acked_features,
@@ -747,7 +747,7 @@ impl VhostUserCommon {
             let mut vu_locked = vu.lock().unwrap();
             if vu_locked.supports_device_state() {
                 let (backend_state, vring_bases) = vu_locked.save_backend_state().map_err(|e| {
-                    MigratableError::Snapshot(anyhow!("Failed saving backend state: {e:?}"))
+                    SnapshotError::Snapshot(format!("Failed saving backend state: {e:?}"))
                 })?;
                 state.backend_state = Some(backend_state);
                 state.vring_bases = Some(vring_bases);
@@ -757,7 +757,7 @@ impl VhostUserCommon {
         Ok(state)
     }
 
-    pub fn snapshot<T>(&mut self, state: &T) -> std::result::Result<Snapshot, MigratableError>
+    pub fn snapshot<T>(&mut self, state: &T) -> std::result::Result<Snapshot, SnapshotError>
     where
         T: Serialize,
     {

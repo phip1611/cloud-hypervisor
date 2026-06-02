@@ -11,7 +11,7 @@ use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vm_device::PciBarType;
-use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable};
+use vm_migration::{Pausable, SnapshotError, Snapshot, Snapshottable};
 
 use crate::device::BarReprogrammingParams;
 use crate::{MsixConfig, PciInterruptPin};
@@ -1151,7 +1151,7 @@ impl Snapshottable for PciConfiguration {
         String::from(PCI_CONFIGURATION_ID)
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         Snapshot::new_from_state(&self.state())
     }
 }

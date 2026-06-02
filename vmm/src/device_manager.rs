@@ -105,8 +105,8 @@ use vm_memory::{Address, GuestAddress, GuestMemoryRegion, GuestUsize, MmapRegion
 use vm_memory::{GuestAddressSpace, GuestMemory};
 use vm_migration::protocol::MemoryRangeTable;
 use vm_migration::{
-    Migratable, MigratableError, Pausable, PausableError, Snapshot, SnapshotData, Snapshottable, Transportable,
-    snapshot_from_id, state_from_id,
+    Migratable, MigratableError, Pausable, PausableError, RestoreError, Snapshot, SnapshotData,
+    SnapshotError, Snapshottable, Transportable, snapshot_from_id, state_from_id,
 };
 use vm_virtio::{AccessPlatform, VirtioDeviceType};
 use vmm_sys_util::eventfd::EventFd;
@@ -635,7 +635,7 @@ pub enum DeviceManagerError {
 
     /// Failed retrieving device state from snapshot
     #[error("Failed retrieving device state from snapshot")]
-    RestoreGetState(#[source] MigratableError),
+    RestoreGetState(#[source] RestoreError),
 
     /// Cannot create a PvPanic device
     #[error("Cannot create a PvPanic device")]
@@ -5712,7 +5712,7 @@ impl Snapshottable for DeviceManager {
         DEVICE_MANAGER_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let mut snapshot = Snapshot::from_data(SnapshotData::new_from_state(&self.state())?);
 
         // We aggregate all devices snapshots.

@@ -7,7 +7,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::anyhow;
-use vm_migration::{MigratableError, Snapshot};
+use vm_migration::{MigratableError, RestoreError, Snapshot};
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::GuestDebuggableError;
@@ -83,10 +83,8 @@ pub fn recv_vm_state(source_url: &str) -> std::result::Result<Snapshot, Migratab
 
 pub fn get_vm_snapshot(snapshot: &Snapshot) -> std::result::Result<VmSnapshot, MigratableError> {
     if let Some(snapshot_data) = snapshot.snapshot_data.as_ref() {
-        return snapshot_data.to_state();
+        return snapshot_data.to_state().map_err(Into::into);
     }
 
-    Err(MigratableError::Restore(anyhow!(
-        "Could not find VM config snapshot section"
-    )))
+    Err(RestoreError::Restore("Could not find VM config snapshot section".to_owned()).into())
 }

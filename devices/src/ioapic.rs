@@ -21,7 +21,7 @@ use vm_device::interrupt::{
     MsiIrqGroupConfig, MsiIrqSourceConfig,
 };
 use vm_memory::GuestAddress;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, Pausable, SnapshotError, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 use super::interrupt_controller::{Error, InterruptController};
@@ -442,7 +442,7 @@ impl Snapshottable for Ioapic {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         Snapshot::new_from_state(&self.state())
     }
 }

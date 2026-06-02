@@ -22,7 +22,7 @@ use virtio_queue::desc::RawDescriptor;
 use virtio_queue::{Queue, QueueT};
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
-use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable};
 use vm_virtio::{AccessPlatform, Translatable};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -507,15 +507,15 @@ impl Snapshottable for Vdpa {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         if !self.migrating {
-            return Err(MigratableError::Snapshot(anyhow!(
-                "Can't snapshot a vDPA device outside live migration"
-            )));
+            return Err(SnapshotError::Snapshot(
+                "Can't snapshot a vDPA device outside live migration".to_owned(),
+            ));
         }
 
         let snapshot = Snapshot::new_from_state(&self.state().map_err(|e| {
-            MigratableError::Snapshot(anyhow!("Error snapshotting vDPA device: {e:?}"))
+            SnapshotError::Snapshot(format!("Error snapshotting vDPA device: {e:?}"))
         })?)?;
 
         // Force the vhost handler to be dropped in order to close the vDPA

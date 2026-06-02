@@ -11,7 +11,7 @@ use std::sync::{Arc, Barrier};
 
 use log::error;
 use vm_device::BusDevice;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, Pausable, SnapshotError, Snapshot, Snapshottable, Transportable};
 
 /// I/O-port.
 pub const DEFAULT_PORT: u64 = 0xe9;
@@ -56,7 +56,7 @@ impl Snapshottable for DebugConsole {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> Result<Snapshot, SnapshotError> {
         Snapshot::new_from_state(&())
     }
 }

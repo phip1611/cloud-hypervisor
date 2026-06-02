@@ -79,7 +79,7 @@ use vm_memory::{Address, ByteValued, GuestMemoryRegion, ReadVolatile};
 use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
 use vm_migration::protocol::{MemoryRangeTable, Request, Response};
 use vm_migration::{
-    Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable, snapshot_from_id,
+    Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable, snapshot_from_id,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
@@ -235,7 +235,7 @@ pub enum Error {
     EventfdError(#[source] std::io::Error),
 
     #[error("Cannot snapshot VM")]
-    Snapshot(#[source] MigratableError),
+    Snapshot(#[source] SnapshotError),
 
     #[error("Cannot restore VM")]
     Restore(#[source] MigratableError),
@@ -3320,22 +3320,22 @@ impl Snapshottable for Vm {
         VM_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         event!("vm", "snapshotting");
 
         #[cfg(feature = "tdx")]
         {
             if self.config.lock().unwrap().is_tdx_enabled() {
-                return Err(MigratableError::Snapshot(anyhow!(
-                    "Snapshot not possible with TDX VM"
-                )));
+                return Err(SnapshotError::Snapshot(
+                    "Snapshot not possible with TDX VM".to_owned(),
+                ));
             }
         }
 
         if self.get_state() != VmState::Paused {
-            return Err(MigratableError::Snapshot(anyhow!(
-                "Trying to snapshot while VM is running"
-            )));
+            return Err(SnapshotError::Snapshot(
+                "Trying to snapshot while VM is running".to_owned(),
+            ));
         }
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -3364,9 +3364,7 @@ impl Snapshottable for Vm {
                     profile,
                 },
             )
-            .map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error generating common cpuid: {e:?}"))
-            })?
+            .map_err(|e| SnapshotError::Snapshot(format!("Error generating common cpuid: {e:?}")))?
         };
 
         let vm_snapshot_state = VmSnapshot {
@@ -3450,7 +3448,7 @@ impl Transportable for Vm {
                 .unwrap()
                 .send(&memory_manager_snapshot.clone(), destination_url)?;
         } else {
-            return Err(MigratableError::Restore(anyhow!(
+            return Err(MigratableError::MigrateSend(anyhow!(
                 "Missing memory manager snapshot"
             )));
         }

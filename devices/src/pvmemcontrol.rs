@@ -23,7 +23,7 @@ use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
     GuestMemoryError, GuestMemoryMmap, Le32, Le64,
 };
-use vm_migration::{Migratable, MigratableError, Pausable, PausableError, Snapshot, Snapshottable, Transportable};
+use vm_migration::{Migratable, MigratableError, Pausable, PausableError, SnapshotError, Snapshot, Snapshottable, Transportable};
 
 const PVMEMCONTROL_VENDOR_ID: u16 = 0x1ae0;
 const PVMEMCONTROL_DEVICE_ID: u16 = 0x0087;
@@ -795,7 +795,7 @@ impl Snapshottable for PvmemcontrolPciDevice {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, SnapshotError> {
         let mut snapshot = Snapshot::new_from_state(&())?;
 
         // Snapshot PciConfiguration
