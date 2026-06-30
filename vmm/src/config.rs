@@ -1621,7 +1621,7 @@ impl DiskConfig {
          rate_limit_group=<group_id>,\
          queue_affinity=<list_of_queue_indices_with_their_associated_cpuset>,\
          serial=<serial_number>,backing_files=on|off,sparse=on|off,\
-         image_type=<raw,qcow2,vhd,vhdx,vmdk>,lock_granularity=byte-range|full,\
+         image_type=<raw,qcow2,vhd,vhdx,vmdk>,lock_granularity=byte-range|full|qemu-compatible,\
          guest_block_size=<size_in_bytes>";
 
     #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
@@ -1635,7 +1635,7 @@ impl DiskConfig {
          rate_limit_group=<group_id>,\
          queue_affinity=<list_of_queue_indices_with_their_associated_cpuset>,\
          serial=<serial_number>,backing_files=on|off,sparse=on|off,\
-         image_type=<raw,qcow2,vhd,vhdx,vmdk>,lock_granularity=byte-range|full,\
+         image_type=<raw,qcow2,vhd,vhdx,vmdk>,lock_granularity=byte-range|full|qemu-compatible,\
          guest_block_size=<size_in_bytes>,bootindex=<index>";
 
     pub fn parse(disk: &str) -> Result<Self> {
@@ -5674,6 +5674,13 @@ mod tests {
             DiskConfig::parse("path=/path/to_file,lock_granularity=byte-range")?,
             DiskConfig {
                 lock_granularity: LockGranularityChoice::ByteRange,
+                ..disk_fixture()
+            }
+        );
+        assert_eq!(
+            DiskConfig::parse("path=/path/to_file,lock_granularity=qemu-compatible")?,
+            DiskConfig {
+                lock_granularity: LockGranularityChoice::QemuCompatible,
                 ..disk_fixture()
             }
         );
