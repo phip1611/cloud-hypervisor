@@ -760,19 +760,23 @@ impl BusDevice for FwCfg {
                 let addr_lo = (addr & 0xffff_ffff) as u32;
                 data.copy_from_slice(&addr_lo.to_be_bytes());
             }
-            (port, _) if qemu_mapped_offsets.any(|mapped_port| mapped_port == port) => {
+            (offset, _) if qemu_mapped_offsets.any(|mapped_offset| mapped_offset == offset) => {
                 // We read from a port that should actually be mapped to fw_cfg. Note that QEMU
                 // doesn't map the entire range but leaves a hole at 0x512 and 0x513. We mimic this
                 // by doing a no-op below for this range.
                 debug!(
-                    "fw_cfg: Unsupported {:#x}-byte read from port {port:#x}.",
-                    data.len()
+                    "fw_cfg: Unsupported {:#x}-byte read from address: base={:#x} + offset={:#x}.",
+                    data.len(),
+                    FW_CFG_ADDRESS_BASE,
+                    offset
                 );
+
                 data.fill(0x0);
             }
-            _ => {
+            (offset, _) => {
+                // We read from a port that shouldn't be mapped to fw_cfg and do nothing but warn.
                 debug!(
-                    "fw_cfg: read from unknown offset {offset:#x}: {:#x} bytes.",
+                    "fw_cfg: read to unmapped address: base={FW_CFG_ADDRESS_BASE:#x} + offset={offset:#x}. Read length: {}. This is a wrong mapping and a bug!",
                     data.len()
                 );
             }
