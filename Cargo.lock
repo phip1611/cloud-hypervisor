@@ -353,6 +353,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cfg-if",
  "crc-any",
+ "event_monitor",
  "flate2",
  "io-uring",
  "libc",
