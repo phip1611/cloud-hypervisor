@@ -145,6 +145,12 @@ pub struct FwCfgItem {
     pub content: FwCfgContent,
 }
 
+// ARM MMIO transport needs a rework.
+// Find more details here: https://github.com/cobaltcore-dev/cobaltcore/issues/650
+#[cfg(all(feature = "fw_cfg", target_arch = "aarch64"))]
+compile_error!(
+    "fw_cfg is not supported on aarch64: the MMIO transport is incomplete and defective."
+);
 /// https://www.qemu.org/docs/master/specs/fw_cfg.html
 #[derive(Debug)]
 pub struct FwCfg {
@@ -699,11 +705,30 @@ impl FwCfg {
         Ok(())
     }
 
+    /// Reads data from this [`FwCfg`]'s item selected through the internal selector buffer and
+    /// writes it's data to the provided buffer.
+    ///
+    /// The read stops at the end of the item and the internal cursor never moves beyond it. If
+    /// less bytes were read from the item than the buffer can hold, remaining bytes of the
+    /// buffer will be filled with zeros (0x0). On errors, the whole buffer is filled with zeros
+    /// and the cursor does not move.
     fn read_data(&mut self, data: &mut [u8]) {
-        if let Ok(content) = self.get_selected_content()
-            && Self::read_content(content, self.data_offset, data).is_ok()
-        {
-            self.data_offset += data.len() as u32;
+        let read_len = (|| {
+            let content = self.get_selected_content()?;
+            let remaining_content_bytes = content.size()?.saturating_sub(self.data_offset);
+            let len = u32::try_from(data.len()).map_or(remaining_content_bytes, |len| {
+                cmp::min(remaining_content_bytes, len)
+            });
+            Self::read_content(content, self.data_offset, &mut data[..len as usize])?;
+            Result::Ok(len)
+        })();
+
+        match read_len {
+            Ok(len) => {
+                data[len as usize..].fill(0x0);
+                self.data_offset += len;
+            }
+            Err(_) => data.fill(0x0),
         }
     }
 }
@@ -751,6 +776,11 @@ impl BusDevice for FwCfg {
                 // treats a 1-byte read at this offset as a data read. Bypass to mimic QEMU quirk.
                 self.read_data(data);
             }
+            // TODO(fw_cfg): For now we need to allow arbitrary length reads from DATA because we
+            // cannot distinguish between on one multi byte long read and multiple single-byte
+            // reads. There is an open issue in kvm-ioctls:
+            // https://github.com/rust-vmm/kvm/issues/371 Once this is solved, we should only
+            // support one-byte-length reads.
             (FW_CFG_DATA_OFFSET, _) => self.read_data(data),
             (FW_CFG_DMA_HI_OFFSET, 4) => {
                 let addr = self.dma_address;
@@ -1256,6 +1286,30 @@ mod tests {
     }
 
     #[test]
+    fn test_register_allow_arbitrary_length_reads_from_data() {
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemory::default()));
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+
+        // Two-byte reads are served.
+        let mut buff = [0xEF; 2];
+        fw_cfg.read(0, FW_CFG_DATA_OFFSET, &mut buff);
+        assert_eq!(buff, *b"QE");
+        assert_eq!(fw_cfg.data_offset, 2);
+        // Four-byte reads are served.
+        let mut buff = [0xEF; 4];
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        fw_cfg.read(0, FW_CFG_DATA_OFFSET, &mut buff);
+        assert_eq!(buff, *b"QEMU");
+        assert_eq!(fw_cfg.data_offset, 4);
+        // Eight-byte reads are served.
+        let mut buff = [0xEF; 8];
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        fw_cfg.read(0, FW_CFG_DATA_OFFSET, &mut buff);
+        assert_eq!(buff, *b"QEMU\0\0\0\0");
+        assert_eq!(fw_cfg.data_offset, 4);
+    }
+
+    #[test]
     fn test_register_invalid_ports_leaves_buffer_untouched() {
         // We should not answer reads from unknown ports.
         let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemory::default()));
@@ -1294,5 +1348,77 @@ mod tests {
         fw_cfg.read(0, FW_CFG_SELECTOR_OFFSET, &mut buff);
         assert_eq!(fw_cfg.data_offset, 1);
         assert_eq!(buff, [0x0; 2]);
+    }
+
+    #[test]
+    fn test_register_reads_past_eof_return_zero() {
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemory::default()));
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        let mut buff = [0xEF; 8];
+        let max_offset = FW_CFG_SIGNATURE_CONTENT.len() as u32;
+        for (offset, byte) in buff.iter_mut().enumerate() {
+            fw_cfg.read(0, FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
+            let expected_offset = if (offset as u32 + 1) < max_offset {
+                offset as u32 + 1
+            } else {
+                max_offset
+            };
+            assert_eq!(fw_cfg.data_offset, expected_offset);
+        }
+        assert_eq!(buff[..4], FW_CFG_SIGNATURE_CONTENT);
+        assert_eq!(buff[4..], [0; 4]);
+    }
+
+    #[test]
+    fn test_register_reads_with_invalid_selector() {
+        const SELECTOR_INITIALIZED_WITH_DEFAULT: u16 = 0x08;
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemory::default()));
+        fw_cfg.known_items[SELECTOR_INITIALIZED_WITH_DEFAULT as usize] = FwCfgContent::Slice(&[]);
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[0xFF, 0]);
+        let mut buff = [0xEF_u8; 8];
+        for byte in buff.iter_mut() {
+            fw_cfg.read(0, FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
+            assert_eq!(fw_cfg.data_offset, 0);
+        }
+        assert_eq!(buff, [0; 8]);
+
+        fw_cfg.write(
+            0,
+            FW_CFG_SELECTOR_OFFSET,
+            &SELECTOR_INITIALIZED_WITH_DEFAULT.to_le_bytes(),
+        );
+        let mut buff = [0xEF_u8; 8];
+        for byte in buff.iter_mut() {
+            fw_cfg.read(0, FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
+            assert_eq!(fw_cfg.data_offset, 0);
+        }
+        assert_eq!(buff, [0; 8]);
+    }
+
+    #[test]
+    fn test_register_writing_select_resets_internal_cursor() {
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemory::default()));
+        let payload_bytes = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let content = FwCfgContent::Bytes(payload_bytes.to_vec());
+        let cfg_item = FwCfgItem {
+            name: "payload".to_string(),
+            content,
+        };
+        fw_cfg.add_item(cfg_item).unwrap();
+
+        // Read the same bytes twice, demonstrating that we can reset the cursor by selecting a new item.
+        for _ in 0..2 {
+            fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &FW_CFG_FILE_FIRST.to_le_bytes());
+            assert_eq!(fw_cfg.data_offset, 0);
+            let mut buffer = [0xEF_u8; 6];
+            const MAX_INDEX: usize = 4;
+            for (index, byte) in buffer.iter_mut().enumerate().take(MAX_INDEX) {
+                fw_cfg.read(0, FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
+                assert_eq!(fw_cfg.data_offset as usize, index + 1);
+            }
+            assert_eq!(buffer[..MAX_INDEX], payload_bytes[..MAX_INDEX]);
+            assert_eq!(buffer[MAX_INDEX..], [0xEF; 2]);
+            assert_eq!(fw_cfg.data_offset, MAX_INDEX as u32);
+        }
     }
 }
