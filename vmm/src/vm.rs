@@ -1216,6 +1216,7 @@ impl Vm {
             #[cfg(target_arch = "x86_64")]
             max_cpus: u16::try_from(apic_limit)
                 .map_err(|_| Error::FwCfgCannotRepresentNumMaxVCpus(apic_limit))?,
+            boot_menu: false,
         };
 
         let fw_cfg = self
