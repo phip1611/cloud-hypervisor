@@ -332,6 +332,12 @@ pub enum Error {
     #[cfg(feature = "fw_cfg")]
     #[error("Error parsing the VM's UUID")]
     FwCfgInvalidUuid(#[source] UuidError),
+
+    #[cfg(feature = "fw_cfg")]
+    #[error(
+        "Number of vCPUs cannot be represented with fw_cfg. {0} exceed the maximum count of 65535"
+    )]
+    FwCfgCannotRepresentNumVCpus(u32),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -1166,6 +1172,13 @@ impl Vm {
             fw_cfg_item_list_option = Some(fw_cfg_item_list);
         }
 
+        // fw_cfg can only be used with u16::MAX vCPUs.
+        let nb_cpus = config
+            .cpus
+            .boot_vcpus
+            .try_into()
+            .map_err(|_| Error::FwCfgCannotRepresentNumVCpus(config.cpus.boot_vcpus))?;
+
         let init = FwCfgInitParams {
             cmdline: cmdline_option,
             kernel: kernel_option,
@@ -1181,6 +1194,7 @@ impl Vm {
                 .unwrap_or_else(Uuid::nil),
             ram_size: config.memory.size,
             no_graphics: true,
+            nb_cpus,
         };
 
         let fw_cfg = self
