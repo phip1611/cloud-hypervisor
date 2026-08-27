@@ -1093,17 +1093,16 @@ impl Vm {
 
     #[cfg(feature = "fw_cfg")]
     fn populate_fw_cfg(
+        &self,
         fw_cfg_config: &FwCfgConfig,
-        device_manager: &Arc<Mutex<DeviceManager>>,
-        config: &Arc<Mutex<VmConfig>>,
         #[cfg(target_arch = "x86_64")] boot_memory: &GuestMemory,
         #[cfg(target_arch = "x86_64")] kvm_sev_snp_enabled: bool,
     ) -> Result<()> {
+        let config = self.config.lock().unwrap();
+
         let mut kernel_option: Option<File> = None;
         if fw_cfg_config.kernel {
             let kernel = config
-                .lock()
-                .unwrap()
                 .payload
                 .as_ref()
                 .map(|p| p.kernel.as_ref().map(File::open))
@@ -1115,9 +1114,9 @@ impl Vm {
         let mut cmdline_option: Option<ffi::CString> = None;
         if fw_cfg_config.cmdline {
             let cmdline = Vm::generate_cmdline(
-                config.lock().unwrap().payload.as_ref().unwrap(),
+                config.payload.as_ref().unwrap(),
                 #[cfg(target_arch = "aarch64")]
-                device_manager,
+                &self.device_manager,
             )
             .map_err(|_| Error::MissingFwCfgCmdline)?
             .as_cstring()
@@ -1127,8 +1126,6 @@ impl Vm {
         let mut initramfs_option: Option<File> = None;
         if fw_cfg_config.initramfs {
             let initramfs = config
-                .lock()
-                .unwrap()
                 .payload
                 .as_ref()
                 .map(|p| p.initramfs.as_ref().map(File::open))
@@ -1163,7 +1160,8 @@ impl Vm {
             fw_cfg_item_list_option = Some(fw_cfg_item_list);
         }
 
-        let fw_cfg = device_manager
+        let fw_cfg = self
+            .device_manager
             .lock()
             .unwrap()
             .fw_cfg()
@@ -2467,10 +2465,8 @@ impl Vm {
 
                 #[cfg(target_arch = "x86_64")]
                 let boot_memory = self.memory_manager.lock().unwrap().boot_guest_memory();
-                Self::populate_fw_cfg(
+                self.populate_fw_cfg(
                     &fw_cfg_config,
-                    &self.device_manager,
-                    &self.config,
                     #[cfg(target_arch = "x86_64")]
                     &boot_memory,
                     #[cfg(target_arch = "x86_64")]
