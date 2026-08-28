@@ -74,6 +74,8 @@ use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracer::trace_scoped;
+#[cfg(feature = "fw_cfg")]
+use uuid::{Error as UuidError, Uuid};
 use vm_device::Bus;
 use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
 use vm_migration::protocol::{MemoryRangeTable, Request, Response};
@@ -326,6 +328,10 @@ pub enum Error {
     /// Cannot apply NUMA memory zone updates
     #[error("Error applying memory zone updates")]
     ApplyMemoryZoneUpdate(#[source] MemoryZoneUpdateError),
+
+    #[cfg(feature = "fw_cfg")]
+    #[error("Error parsing the VM's UUID")]
+    FwCfgInvalidUuid(#[source] UuidError),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -1165,6 +1171,14 @@ impl Vm {
             kernel: kernel_option,
             initramfs: initramfs_option,
             item_list: fw_cfg_item_list_option,
+            uuid: config
+                .platform
+                .as_ref()
+                .and_then(|pc| pc.system_uuid.as_ref())
+                .map(|s| Uuid::parse_str(s))
+                .transpose()
+                .map_err(Error::FwCfgInvalidUuid)?
+                .unwrap_or_else(Uuid::nil),
         };
 
         let fw_cfg = self
