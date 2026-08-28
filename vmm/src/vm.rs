@@ -38,7 +38,7 @@ use devices::AcpiNotificationFlags;
 #[cfg(feature = "fw_cfg")]
 use devices::legacy::fw_cfg;
 #[cfg(feature = "fw_cfg")]
-use devices::legacy::fw_cfg::FwCfgItem;
+use devices::legacy::fw_cfg::{FwCfgInitParams, FwCfgItem};
 use event_monitor::event;
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 use gdbstub_arch::aarch64::reg::AArch64CoreRegs as CoreRegs;
@@ -1160,6 +1160,13 @@ impl Vm {
             fw_cfg_item_list_option = Some(fw_cfg_item_list);
         }
 
+        let init = FwCfgInitParams {
+            cmdline: cmdline_option,
+            kernel: kernel_option,
+            initramfs: initramfs_option,
+            item_list: fw_cfg_item_list_option,
+        };
+
         let fw_cfg = self
             .device_manager
             .lock()
@@ -1177,10 +1184,7 @@ impl Vm {
         }
         fw_cfg
             .populate_fw_cfg(
-                kernel_option,
-                initramfs_option,
-                cmdline_option,
-                fw_cfg_item_list_option,
+                init,
                 #[cfg(target_arch = "x86_64")]
                 kvm_sev_snp_enabled,
             )
