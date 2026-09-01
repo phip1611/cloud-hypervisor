@@ -180,6 +180,9 @@ const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
 #[cfg(target_arch = "x86_64")]
 ioctl_io_nr!(KVM_NMI, kvm_bindings::KVMIO, 0x9a);
+// kvm-ioctls does not expose KVM_X86_SETUP_MCE.
+#[cfg(target_arch = "x86_64")]
+ioctl_iow_nr!(KVM_X86_SETUP_MCE, kvm_bindings::KVMIO, 0x9c, u64);
 // kvm-ioctls only exposes the vCPU device-attribute ioctls for aarch64.
 #[cfg(target_arch = "x86_64")]
 ioctl_iow_nr!(
@@ -892,6 +895,25 @@ impl vm::Vm for KvmVm {
             .fd
             .create_vcpu(id as u64)
             .map_err(|e| vm::HypervisorVmError::CreateVcpu(e.into()))?;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Expose a machine-check architecture to the guest, like firmware
+            // on real hardware implies. Without this, KVM's local APIC lacks
+            // the CMCI LVT entry (register reads at 0x2f0 fail) although real
+            // CPUs of the exposed generations have it. Bits: 10 banks,
+            // MCG_CTL_P (8), MCG_CMCI_P (10), MCG_SER_P (24).
+            let mcg_cap: u64 = 10 | (1 << 8) | (1 << 10) | (1 << 24);
+            // SAFETY: fd is a valid vCPU fd, the ioctl expects a u64 by
+            // reference and does not retain the pointer.
+            let ret = unsafe { ioctl_with_ref(&fd, KVM_X86_SETUP_MCE(), &mcg_cap) };
+            if ret != 0 {
+                return Err(vm::HypervisorVmError::CreateVcpu(anyhow!(
+                    "KVM_X86_SETUP_MCE failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
 
         #[cfg(target_arch = "riscv64")]
         {
