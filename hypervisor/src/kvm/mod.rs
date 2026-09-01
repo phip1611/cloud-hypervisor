@@ -3657,6 +3657,11 @@ impl cpu::Vcpu for KvmVcpu {
                 msr_index::MSR_IA32_MISC_ENABLE_FAST_STRING as u64
             ),
             msr_data!(msr_index::MSR_MTRRdefType, MTRR_ENABLE | MTRR_MEM_TYPE_WB),
+            msr_data!(
+                msr_index::MSR_IA32_FEATURE_CONTROL,
+                (msr_index::FEATURE_CONTROL_LOCKED
+                    | msr_index::FEATURE_CONTROL_VMXON_ENABLED_OUTSIDE_SMX) as u64
+            ),
         ]);
 
         boot_entries
