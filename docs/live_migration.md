@@ -152,6 +152,15 @@ only uses the guest announcement path.
 If TCP socket is selected for migration, we need to consider migrating
 in a trusted network.
 
+**Warning**: without TLS, the listener accepts data from anyone who can
+connect to it. The migration source has the same power as a trusted
+management interface client: the transferred VM configuration names
+host resources (disk paths, console files) that the destination opens,
+and additional migration connections can write guest memory. Use
+plaintext `tcp:` only on networks where every host is trusted; on any
+other network, use the mutual TLS support described below, or a UNIX
+socket combined with filesystem permissions.
+
 #### Starting the Receiver VM
 
 On the receiver side, we prepare an empty VM:
