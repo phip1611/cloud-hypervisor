@@ -98,7 +98,7 @@ struct PvmemcontrolTransportRegisterResponse {
 union PvmemcontrolTransportUnion {
     register: PvmemcontrolTransportRegister,
     register_response: PvmemcontrolTransportRegisterResponse,
-    unit: (),
+    _padding: [u8; 8],
 }
 
 #[repr(C)]
@@ -106,6 +106,8 @@ union PvmemcontrolTransportUnion {
 struct PvmemcontrolTransport {
     payload: PvmemcontrolTransportUnion,
     command: PvmemcontrolTransportCommand,
+    // Explicit tail padding; guest-readable, so it must stay zeroed.
+    _padding: u32,
 }
 
 const PVMEMCONTROL_DEVICE_MMIO_SIZE: u64 = size_of::<PvmemcontrolTransport>() as u64;
@@ -114,15 +116,17 @@ const PVMEMCONTROL_DEVICE_MMIO_ALIGN: u64 = align_of::<PvmemcontrolTransport>() 
 impl PvmemcontrolTransport {
     fn ack() -> Self {
         PvmemcontrolTransport {
-            payload: PvmemcontrolTransportUnion { unit: () },
+            payload: PvmemcontrolTransportUnion { _padding: [0u8; 8] },
             command: PvmemcontrolTransportCommand::Ack,
+            _padding: 0,
         }
     }
 
     fn error() -> Self {
         PvmemcontrolTransport {
-            payload: PvmemcontrolTransportUnion { unit: () },
+            payload: PvmemcontrolTransportUnion { _padding: [0u8; 8] },
             command: PvmemcontrolTransportCommand::Error,
+            _padding: 0,
         }
     }
 
@@ -135,6 +139,7 @@ impl PvmemcontrolTransport {
                 },
             },
             command: PvmemcontrolTransportCommand::Ack,
+            _padding: 0,
         }
     }
 
@@ -144,9 +149,11 @@ impl PvmemcontrolTransport {
     }
 }
 
-// SAFETY: Contains no references and does not have compiler-inserted padding
+// SAFETY: Contains no references; all variants are exactly 8 bytes, so there
+// is no implicit padding
 unsafe impl ByteValued for PvmemcontrolTransportUnion {}
-// SAFETY: Contains no references and does not have compiler-inserted padding
+// SAFETY: Contains no references; the tail padding is an explicit field, so
+// there is no compiler-inserted padding
 unsafe impl ByteValued for PvmemcontrolTransport {}
 
 #[repr(u64)]
