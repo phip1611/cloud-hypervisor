@@ -732,7 +732,9 @@ impl VhostUserHandle {
         // address in guest RAM.
         // A page is always 4kiB from a vhost-user perspective, and each bit is
         // a page. That's how we can compute mmap_size from the last address.
-        let mmap_size = (last_ram_addr / (VHOST_LOG_PAGE * 8)) + 1;
+        // Round up to a multiple of 8 because dirty_log() reads the bitmap
+        // back in u64 words and would otherwise miss the tail bytes.
+        let mmap_size = ((last_ram_addr / (VHOST_LOG_PAGE * 8)) + 1).next_multiple_of(8);
         let mmap_handle = file.as_raw_fd();
 
         // Set shm_log region size
@@ -845,6 +847,11 @@ impl VhostUserHandle {
         // region. The previous region is returned and processed to create the
         // bitmap representing the dirty pages.
         if let Some(region) = self.update_log_base(last_ram_addr)? {
+            debug_assert_eq!(
+                region.size() % size_of::<u64>(),
+                0,
+                "length of the region must be a multiple of 8"
+            );
             // Be careful with the size, as it was based on u8, meaning we must
             // divide it by 8.
             let len = region.size() / 8;
