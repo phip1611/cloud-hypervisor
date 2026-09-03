@@ -65,11 +65,16 @@ struct BackendReqHandler {
 
 impl VhostUserFrontendReqHandler for BackendReqHandler {
     fn handle_config_change(&self) -> io::Result<u64> {
-        let mut vu = self.vu.lock().unwrap();
-        let config = get_block_config(&mut vu, self.num_queues).map_err(|e| {
-            error!("Failed to refresh vhost-user-blk configuration: {e:?}");
-            io::Error::other(e)
-        })?;
+        // Never hold the vu lock while taking the config lock: other paths
+        // take config first, so that would allow an ABBA deadlock driven by
+        // a backend that times its GET_CONFIG reply.
+        let config = {
+            let mut vu = self.vu.lock().unwrap();
+            get_block_config(&mut vu, self.num_queues).map_err(|e| {
+                error!("Failed to refresh vhost-user-blk configuration: {e:?}");
+                io::Error::other(e)
+            })?
+        };
         *self.config.lock().unwrap() = config;
         self.interrupt_cb
             .trigger(VirtioInterruptType::Config)
@@ -229,7 +234,10 @@ impl Blk {
     }
 
     fn state(&self) -> result::Result<State, MigratableError> {
-        self.vu_common.state(*self.config.lock().unwrap())
+        // Bind the copy first: as a tail expression, the config guard would
+        // be held across vu_common.state(), which locks vu.
+        let config = *self.config.lock().unwrap();
+        self.vu_common.state(config)
     }
 }
 
