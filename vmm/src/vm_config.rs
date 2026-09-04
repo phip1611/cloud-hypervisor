@@ -1096,7 +1096,7 @@ pub struct PayloadConfig {
 
 #[cfg(feature = "fw_cfg")]
 #[serde_with::skip_serializing_none]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct FwCfgConfig {
     pub e820: bool,
@@ -1105,20 +1105,6 @@ pub struct FwCfgConfig {
     pub initramfs: bool,
     pub acpi_tables: bool,
     pub items: Option<FwCfgItemList>,
-}
-
-#[cfg(feature = "fw_cfg")]
-impl Default for FwCfgConfig {
-    fn default() -> Self {
-        FwCfgConfig {
-            e820: cfg!(target_arch = "x86_64"),
-            kernel: true,
-            cmdline: true,
-            initramfs: true,
-            acpi_tables: true,
-            items: None,
-        }
-    }
 }
 
 #[cfg(feature = "fw_cfg")]
