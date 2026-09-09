@@ -6386,13 +6386,9 @@ mod common_parallel {
 
             assert!(remote_command(&api_socket, "nmi", None));
 
-            let expected_sequential_events = [&MetaEvent {
-                event: "panic".to_string(),
-                device_id: None,
-            }];
-            assert!(wait_for_latest_events_exact(
+            assert!(wait_for_latest_events_exact_str(
                 Duration::from_secs(3),
-                &expected_sequential_events,
+                &["panic"],
                 &event_path
             ));
         });
@@ -8354,14 +8350,10 @@ mod ivshmem {
             .spawn()
             .unwrap();
 
-        let latest_events = [&MetaEvent {
-            event: "restored".to_string(),
-            device_id: None,
-        }];
         // Wait for the restored event to show up in the monitor file.
-        assert!(wait_for_latest_events_exact(
+        assert!(wait_for_latest_events_exact_str(
             Duration::from_secs(30),
-            &latest_events,
+            &["restored"],
             &event_path_restored
         ));
 
@@ -8376,19 +8368,9 @@ mod ivshmem {
                 None
             )));
             assert!(remote_command(&api_socket_restored, "resume", None));
-            let latest_events = [
-                &MetaEvent {
-                    event: "resuming".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "resumed".to_string(),
-                    device_id: None,
-                },
-            ];
-            assert!(wait_for_latest_events_exact(
+            assert!(wait_for_latest_events_exact_str(
                 Duration::from_secs(30),
-                &latest_events,
+                &["resuming", "resumed"],
                 &event_path_restored
             ));
 
@@ -8594,20 +8576,9 @@ mod snapshot_restore_common {
     ) {
         // Pause the VM
         assert!(remote_command(api_socket, "pause", None));
-        let latest_events: [&MetaEvent; 2] = [
-            &MetaEvent {
-                event: "pausing".to_string(),
-                device_id: None,
-            },
-            &MetaEvent {
-                event: "paused".to_string(),
-                device_id: None,
-            },
-        ];
-
-        assert!(wait_for_latest_events_exact(
+        assert!(wait_for_latest_events_exact_str(
             Duration::from_secs(30),
-            &latest_events,
+            &["pausing", "paused"],
             event_path
         ));
 
@@ -8618,20 +8589,9 @@ mod snapshot_restore_common {
             Some(format!("file://{snapshot_dir}").as_str()),
         ));
 
-        let latest_events = [
-            &MetaEvent {
-                event: "snapshotting".to_string(),
-                device_id: None,
-            },
-            &MetaEvent {
-                event: "snapshotted".to_string(),
-                device_id: None,
-            },
-        ];
-
-        assert!(wait_for_latest_events_exact(
+        assert!(wait_for_latest_events_exact_str(
             Duration::from_secs(30),
-            &latest_events,
+            &["snapshotting", "snapshotted"],
             event_path
         ));
     }
@@ -8834,33 +8794,15 @@ mod snapshot_restore_common {
             &event_path_restored
         ));
         if use_resume_option {
-            let latest_events = [
-                &MetaEvent {
-                    event: "restored".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "resuming".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "resumed".to_string(),
-                    device_id: None,
-                },
-            ];
-            assert!(wait_for_latest_events_exact(
+            assert!(wait_for_latest_events_exact_str(
                 Duration::from_secs(30),
-                &latest_events,
+                &["restored", "resuming", "resumed"],
                 &event_path_restored
             ));
         } else {
-            let latest_events = [&MetaEvent {
-                event: "restored".to_string(),
-                device_id: None,
-            }];
-            assert!(wait_for_latest_events_exact(
+            assert!(wait_for_latest_events_exact_str(
                 Duration::from_secs(30),
-                &latest_events,
+                &["restored"],
                 &event_path_restored
             ));
         }
@@ -8896,19 +8838,9 @@ mod snapshot_restore_common {
                 )));
                 assert!(remote_command(&api_socket_restored, "resume", None));
 
-                let latest_events = [
-                    &MetaEvent {
-                        event: "resuming".to_string(),
-                        device_id: None,
-                    },
-                    &MetaEvent {
-                        event: "resumed".to_string(),
-                        device_id: None,
-                    },
-                ];
-                assert!(wait_for_latest_events_exact(
+                assert!(wait_for_latest_events_exact_str(
                     Duration::from_secs(30),
-                    &latest_events,
+                    &["resuming", "resumed"],
                     &event_path_restored
                 ));
             }
@@ -9059,14 +8991,9 @@ mod snapshot_restore_common {
             .spawn()
             .unwrap();
 
-        let latest_events = [&MetaEvent {
-            event: "restored".to_string(),
-            device_id: None,
-        }];
-
-        assert!(wait_for_latest_events_exact(
+        assert!(wait_for_latest_events_exact_str(
             Duration::from_secs(30),
-            &latest_events,
+            &["restored"],
             &event_path_restored
         ));
 
@@ -9086,19 +9013,9 @@ mod snapshot_restore_common {
 
             assert!(remote_command(&api_socket_restored, "resume", None));
 
-            let latest_events = [
-                &MetaEvent {
-                    event: "resuming".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "resumed".to_string(),
-                    device_id: None,
-                },
-            ];
-            assert!(wait_for_latest_events_exact(
+            assert!(wait_for_latest_events_exact_str(
                 Duration::from_secs(30),
-                &latest_events,
+                &["resuming", "resumed"],
                 &event_path_restored
             ));
 
@@ -9151,13 +9068,9 @@ mod snapshot_restore_common {
             .spawn()
             .unwrap();
 
-        let latest_events = [&MetaEvent {
-            event: "restored".to_string(),
-            device_id: None,
-        }];
-        assert!(wait_for_latest_events_exact(
+        assert!(wait_for_latest_events_exact_str(
             Duration::from_secs(30),
-            &latest_events,
+            &["restored"],
             &event_path_restored2
         ));
 
@@ -9254,13 +9167,9 @@ mod snapshot_restore_common {
             .spawn()
             .unwrap();
 
-        let latest_events = [&MetaEvent {
-            event: "restored".to_string(),
-            device_id: None,
-        }];
-        assert!(wait_for_latest_events_exact(
+        assert!(wait_for_latest_events_exact_str(
             Duration::from_secs(30),
-            &latest_events,
+            &["restored"],
             &event_path_restored
         ));
 
@@ -9273,19 +9182,9 @@ mod snapshot_restore_common {
                 None
             )));
             assert!(remote_command(&api_socket_restored, "resume", None));
-            let latest_events = [
-                &MetaEvent {
-                    event: "resuming".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "resumed".to_string(),
-                    device_id: None,
-                },
-            ];
-            assert!(wait_for_latest_events_exact(
+            assert!(wait_for_latest_events_exact_str(
                 Duration::from_secs(30),
-                &latest_events,
+                &["resuming", "resumed"],
                 &event_path_restored
             ));
 
@@ -9952,13 +9851,9 @@ mod common_sequential {
             &expected_events,
             &event_path_restored
         ));
-        let latest_events = [&MetaEvent {
-            event: "restored".to_string(),
-            device_id: None,
-        }];
-        assert!(wait_for_latest_events_exact(
+        assert!(wait_for_latest_events_exact_str(
             Duration::from_secs(30),
-            &latest_events,
+            &["restored"],
             &event_path_restored
         ));
 
@@ -9974,19 +9869,9 @@ mod common_sequential {
             )));
             assert!(remote_command(&api_socket_restored, "resume", None));
 
-            let latest_events = [
-                &MetaEvent {
-                    event: "resuming".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "resumed".to_string(),
-                    device_id: None,
-                },
-            ];
-            assert!(wait_for_latest_events_exact(
+            assert!(wait_for_latest_events_exact_str(
                 Duration::from_secs(30),
-                &latest_events,
+                &["resuming", "resumed"],
                 &event_path_restored
             ));
 
