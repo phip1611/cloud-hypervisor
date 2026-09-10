@@ -7088,17 +7088,6 @@ mod common_parallel {
         })
     }
 
-    /// Waits until a freshly spawned VMM answers API requests.
-    fn wait_for_vmm_api(api_socket: &str) {
-        assert!(
-            wait_until(Duration::from_secs(30), || {
-                // Silent variant: don't log every failed poll.
-                remote_command_w_output(api_socket, "ping", None).0
-            }),
-            "VMM API should become available at {api_socket}"
-        );
-    }
-
     fn dispatch_live_migration_tcp_with_flags(
         src_api_socket: &str,
         dest_api_socket: &str,
@@ -7106,7 +7095,8 @@ mod common_parallel {
         connections: NonZeroU32,
         postcopy: bool,
     ) -> Option<Child> {
-        wait_for_vmm_api(dest_api_socket);
+        // Wait for CH to start and to accept API requests
+        wait_for_sequential_events_str(Duration::from_secs(10), &["starting"], dest_api_socket);
 
         // Get an available TCP port
         let migration_port = get_available_port();
@@ -7174,7 +7164,8 @@ mod common_parallel {
         migration_socket: &str,
         memory_mode: &str,
     ) -> Option<Child> {
-        wait_for_vmm_api(dest_api_socket);
+        // Wait for CH to start and to accept API requests
+        wait_for_sequential_events_str(Duration::from_secs(10), &["starting"], dest_api_socket);
 
         let mut receive_migration = Command::new(clh_command("ch-remote"))
             .args([
