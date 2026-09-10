@@ -521,7 +521,6 @@ pub fn start_vmm_thread(
                 )?;
 
                 vmm.setup_signal_handler(landlock_enable)?;
-
                 vmm.control_loop(
                     &api_receiver,
                     #[cfg(feature = "guest_debug")]
@@ -584,6 +583,9 @@ pub fn start_vmm_thread(
             .map_err(Error::GdbThreadSpawn)?;
     }
 
+    
+    // Emit this after the API socket (if present) is connectable
+    event!("vmm", "started");
     Ok(VmmThreadHandle {
         thread_handle: thread,
         #[cfg(feature = "dbus_api")]
