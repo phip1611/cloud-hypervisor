@@ -114,7 +114,7 @@ impl Gic {
     }
 
     pub fn get_vgic(&mut self) -> Result<Arc<Mutex<dyn Vgic>>> {
-        Ok(self.vgic.clone().unwrap())
+        Ok(Arc::clone(&self.vgic.unwrap()))
     }
 }
 
@@ -140,7 +140,7 @@ impl Snapshottable for Gic {
     }
 
     fn snapshot(&mut self) -> result::Result<Snapshot, MigratableError> {
-        let vgic = self.vgic.as_ref().unwrap().clone();
+        let vgic = Arc::clone(self.vgic.as_ref().unwrap());
         let state = vgic.lock().unwrap().state().unwrap();
         Snapshot::new_from_state(&state)
     }
@@ -149,7 +149,7 @@ impl Snapshottable for Gic {
 impl Pausable for Gic {
     fn pause(&mut self) -> result::Result<(), MigratableError> {
         // Flush tables to guest RAM
-        let vgic = self.vgic.as_ref().unwrap().clone();
+        let vgic = Arc::clone(self.vgic.as_ref().unwrap());
         vgic.lock().unwrap().save_data_tables().map_err(|e| {
             MigratableError::Pause(anyhow!("Could not save GICv3ITS GIC pending tables {e:?}",))
         })?;
