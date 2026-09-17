@@ -64,7 +64,7 @@ impl ReceiveListener {
                     .context("Failed to accept TCP migration connection")
                     .map_err(MigratableError::MigrateReceive)?;
 
-                set_tcp_keepalive_and_user_timeout(&socket)
+                set_migration_tcp_options(&socket)
                     .context("Failed to set socket options")
                     .map_err(MigratableError::MigrateReceive)?;
 
@@ -81,7 +81,7 @@ impl ReceiveListener {
                     .context("Failed to accept TCP connection")
                     .map_err(MigratableError::MigrateReceive)?;
 
-                set_tcp_keepalive_and_user_timeout(&socket)
+                set_migration_tcp_options(&socket)
                     .context("Failed to set socket options")
                     .map_err(MigratableError::MigrateReceive)?;
 
@@ -1268,10 +1268,15 @@ pub(crate) fn tcp_address_to_server_name(address: &str) -> Result<&str, TcpAddre
     Ok(host)
 }
 
-/// Enables `SO_KEEPALIVE` and `TCP_USER_TIMEOUT` for the `tcp_stream`'s socket.
+/// Sets the socket options shared by all migration TCP connections.
 ///
-/// The set options target a failure detection time of two to three minutes.
-fn set_tcp_keepalive_and_user_timeout(tcp_stream: &TcpStream) -> io::Result<()> {
+/// `SO_KEEPALIVE` and `TCP_USER_TIMEOUT` target a failure detection time of
+/// two to three minutes. `TCP_NODELAY` keeps Nagle's algorithm from holding
+/// back the tail of a request until the peer acknowledges an earlier segment:
+/// the migration protocol writes a request and then waits for the response,
+/// so such a segment is only acknowledged after the peer's delayed
+/// acknowledgement timer fires, which costs 40ms per affected request.
+fn set_migration_tcp_options(tcp_stream: &TcpStream) -> io::Result<()> {
     /// [`TcpKeepalive`] config for migration TCP sockets.
     ///
     /// After 60 seconds, the kernel starts sending keepalive probes.
@@ -1292,7 +1297,9 @@ fn set_tcp_keepalive_and_user_timeout(tcp_stream: &TcpStream) -> io::Result<()> 
     // https://github.com/rust-lang/rust/issues/155889 is stabilized.
     socket_ref.set_tcp_keepalive(&MIGRATION_TCP_KEEPALIVE)?;
 
-    socket_ref.set_tcp_user_timeout(Some(Duration::from_secs(120)))
+    socket_ref.set_tcp_user_timeout(Some(Duration::from_secs(120)))?;
+
+    tcp_stream.set_nodelay(true)
 }
 
 /// Connect to a migration endpoint and return the established stream.
@@ -1307,7 +1314,7 @@ pub(crate) fn send_migration_socket(
             .context("Error connecting to TCP socket")
             .map_err(MigratableError::MigrateSend)?;
 
-        set_tcp_keepalive_and_user_timeout(&socket)
+        set_migration_tcp_options(&socket)
             .context("Failed to set socket options")
             .map_err(MigratableError::MigrateSend)?;
 
@@ -1346,10 +1353,6 @@ pub(crate) fn open_fault_connection(
 ) -> Result<SocketStream, MigratableError> {
     let mut socket = send_migration_socket(destination_url, tls_dir)?;
     ConnectionRole::Fault.write_to(&mut socket)?;
-    // Enable fault request/response round-trips.
-    socket
-        .set_nodelay(true)
-        .map_err(MigratableError::MigrateSocket)?;
     Ok(socket)
 }
 
