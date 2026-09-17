@@ -26,10 +26,10 @@ use serde_json;
 use socket2::{SockRef, TcpKeepalive};
 use thiserror::Error;
 use vm_memory::bitmap::BitmapSlice;
-use vm_memory::volatile_memory::PtrGuard;
+use vm_memory::volatile_memory::{PtrGuard, PtrGuardMut};
 use vm_memory::{
-    Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, Permissions,
-    ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile,
+    GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, Permissions, ReadVolatile,
+    VolatileMemoryError, VolatileSlice, WriteVolatile,
 };
 use vm_migration::protocol::{Command, ConnectionRole, MemoryRangeTable, Request, Response};
 use vm_migration::tls::{TlsServerConfig, TlsStream};
@@ -286,6 +286,88 @@ impl SocketStream {
     }
 }
 
+impl SocketStream {
+    /// Fills every buffer in `iovs` completely.
+    ///
+    /// `iovs` is left in an unspecified state.
+    ///
+    /// # Safety
+    ///
+    /// Each buffer must point to at least `iov_len` writable bytes for the
+    /// duration of the call, and nothing else may access that memory
+    /// non-volatilely while this runs.
+    unsafe fn read_exact_iovecs(
+        &mut self,
+        iovs: &mut [libc::iovec],
+    ) -> Result<(), MigratableError> {
+        // TLS data has to be decrypted through rustls, which reads into its
+        // own buffer anyway, so readv(2) cannot be used.
+        if let SocketStream::Tls(_) = self {
+            for iov in iovs {
+                // SAFETY: valid for writes per this function's contract. The
+                // dirty bitmap is handled by the caller, hence no bitmap here.
+                let mut slice = unsafe { VolatileSlice::new(iov.iov_base.cast(), iov.iov_len) };
+                self.read_exact_volatile(&mut slice)?;
+            }
+            return Ok(());
+        }
+
+        let fd = self.as_fd().as_raw_fd();
+        let mut iovs = iovs;
+        while !iovs.is_empty() {
+            let count = iovs.len().min(MAX_IOV);
+            // SAFETY: `iovs` is valid for writes per this function's contract,
+            // and `count` does not exceed either the slice length or IOV_MAX.
+            let read = unsafe { libc::readv(fd, iovs.as_ptr(), count as libc::c_int) };
+
+            if read < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(MigratableError::MigrateSocket(error));
+            }
+
+            // Don't spin forever on a closed connection.
+            if read == 0 {
+                return Err(MigratableError::MigrateReceive(anyhow!(
+                    "Connection closed while receiving memory: EOF"
+                )));
+            }
+
+            iovs = advance_iovecs(iovs, read as usize);
+        }
+
+        Ok(())
+    }
+
+    /// Reads until `slice` is full.
+    fn read_exact_volatile<B: BitmapSlice>(
+        &mut self,
+        slice: &mut VolatileSlice<B>,
+    ) -> Result<(), MigratableError> {
+        let mut offset = 0;
+        while offset < slice.len() {
+            let mut remainder = slice
+                .offset(offset)
+                .map_err(|e| MigratableError::MigrateReceive(anyhow!("{e}")))?;
+
+            let read = self
+                .read_volatile(&mut remainder)
+                .map_err(|e| MigratableError::MigrateReceive(anyhow!("{e}")))?;
+
+            if read == 0 {
+                return Err(MigratableError::MigrateReceive(anyhow!(
+                    "Connection closed while receiving memory: EOF"
+                )));
+            }
+            offset += read;
+        }
+
+        Ok(())
+    }
+}
+
 /// Drops the `count` bytes at the front of `iovs` that have been transferred
 /// and returns what is left.
 fn advance_iovecs(iovs: &mut [libc::iovec], mut count: usize) -> &mut [libc::iovec] {
@@ -311,6 +393,7 @@ fn advance_iovecs(iovs: &mut [libc::iovec], mut count: usize) -> &mut [libc::iov
 struct IoVecBatch<'a> {
     iovs: Vec<libc::iovec>,
     guards: Vec<PtrGuard>,
+    write_guards: Vec<PtrGuardMut>,
     _borrowed: PhantomData<&'a [u8]>,
 }
 
@@ -331,8 +414,37 @@ impl<'a> IoVecBatch<'a> {
         self.guards.push(guard);
     }
 
+    /// Adds guest memory to receive into, and marks it dirty up front, which
+    /// is what vm-memory does for a failed read as well.
+    fn push_guest_memory_mut<B: BitmapSlice>(&mut self, slice: &VolatileSlice<'a, B>) {
+        slice.bitmap().mark_dirty(0, slice.len());
+
+        let guard = slice.ptr_guard_mut();
+        self.iovs.push(libc::iovec {
+            iov_base: guard.as_ptr().cast(),
+            iov_len: guard.len(),
+        });
+        self.write_guards.push(guard);
+    }
+
     fn is_full(&self) -> bool {
         self.iovs.len() >= MAX_IOV
+    }
+
+    /// Fills the collected buffers and empties the batch.
+    fn fill(&mut self, socket: &mut SocketStream) -> Result<(), MigratableError> {
+        if self.iovs.is_empty() {
+            return Ok(());
+        }
+
+        // SAFETY: every buffer points into guest memory that
+        // `self.write_guards` keeps mapped for the duration of the call, and
+        // the ranges of one request do not overlap each other.
+        let result = unsafe { socket.read_exact_iovecs(&mut self.iovs) };
+
+        self.iovs.clear();
+        self.write_guards.clear();
+        result
     }
 
     /// Writes the collected buffers and empties the batch.
@@ -1388,42 +1500,34 @@ pub(crate) fn receive_memory_ranges(
     // Read the memory table
     let ranges = MemoryRangeTable::read_from(socket, req.length())?;
 
-    // And then the memory itself
+    // And then the memory itself. As on the sending side, the ranges are
+    // received in batches so that a fragmented iteration does not cost one
+    // read(2) and one wakeup per range.
     let mem = guest_memory.memory();
+    let mut batch = IoVecBatch::default();
 
     for range in ranges.regions() {
-        let mut offset: u64 = 0;
-        // Here we are manually handling the retry in case we can't read the
-        // whole region at once because we can't use the implementation
-        // from vm-memory::GuestMemory of read_exact_from() as it is not
-        // following the correct behavior. For more info about this issue
-        // see: https://github.com/rust-vmm/vm-memory/issues/174
-        loop {
-            let bytes_read = mem
-                .read_volatile_from(
-                    GuestAddress(range.gpa + offset),
-                    socket,
-                    (range.length - offset) as usize,
-                )
-                .context("Error receiving memory from socket")
+        let slices = mem
+            .get_slices(
+                GuestAddress(range.gpa),
+                range.length as usize,
+                Permissions::Write,
+            )
+            .context("Error accessing guest memory to receive into")
+            .map_err(MigratableError::MigrateReceive)?;
+
+        for slice in slices {
+            let slice = slice
+                .context("Error accessing guest memory to receive into")
                 .map_err(MigratableError::MigrateReceive)?;
-
-            // EOF: Don't spin forever on closed connection
-            if bytes_read == 0 {
-                return Err(MigratableError::MigrateReceive(anyhow!(
-                    "Connection closed while receiving memory: EOF"
-                )));
-            }
-
-            offset += bytes_read as u64;
-
-            if offset == range.length {
-                break;
+            batch.push_guest_memory_mut(&slice);
+            if batch.is_full() {
+                batch.fill(socket)?;
             }
         }
     }
 
-    Ok(())
+    batch.fill(socket)
 }
 
 #[cfg(test)]
