@@ -372,6 +372,61 @@ impl ReadVolatile for TlsStream {
     }
 }
 
+impl TlsStream {
+    /// Writes every buffer in `iovs` through the TLS session.
+    ///
+    /// The buffers are copied into the staging buffer and written in as few
+    /// TLS records as possible; rustls needs the plaintext in a buffer to
+    /// encrypt it, so writing each buffer on its own would produce one record
+    /// per buffer.
+    ///
+    /// # Safety
+    ///
+    /// Each buffer must point to at least `iov_len` readable bytes for the
+    /// duration of the call.
+    pub unsafe fn write_all_iovecs(&mut self, iovs: &[libc::iovec]) -> io::Result<()> {
+        if self.write_buf.len() < Self::BUF_SIZE {
+            self.write_buf.resize(Self::BUF_SIZE, 0);
+        }
+
+        let mut filled = 0;
+        for iov in iovs {
+            let mut copied = 0;
+            while copied < iov.iov_len {
+                let len = (iov.iov_len - copied).min(Self::BUF_SIZE - filled);
+                // SAFETY: the source is valid for `iov_len` bytes per this
+                // function's contract, and both ranges are within bounds.
+                unsafe {
+                    let src = iov.iov_base.cast::<u8>().add(copied);
+                    src.copy_to_nonoverlapping(self.write_buf[filled..].as_mut_ptr(), len);
+                }
+                copied += len;
+                filled += len;
+
+                if filled == Self::BUF_SIZE {
+                    self.write_staged(filled)?;
+                    filled = 0;
+                }
+            }
+        }
+
+        self.write_staged(filled)
+    }
+
+    /// Writes the first `len` bytes of the staging buffer.
+    fn write_staged(&mut self, len: usize) -> io::Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let buf = &self.write_buf[..len];
+        match &mut self.stream {
+            TlsStreamParticipant::Client(s) => s.write_all(buf),
+            TlsStreamParticipant::Server(s) => s.write_all(buf),
+        }
+    }
+}
+
 impl WriteVolatile for TlsStream {
     fn write_volatile<B: BitmapSlice>(
         &mut self,

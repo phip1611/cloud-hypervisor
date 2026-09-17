@@ -6,6 +6,7 @@
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::io::{self, ErrorKind, Read, Write};
+use std::marker::PhantomData;
 use std::net::{TcpListener, TcpStream};
 use std::num::{NonZeroU32, ParseIntError};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
@@ -25,14 +26,16 @@ use serde_json;
 use socket2::{SockRef, TcpKeepalive};
 use thiserror::Error;
 use vm_memory::bitmap::BitmapSlice;
+use vm_memory::volatile_memory::PtrGuard;
 use vm_memory::{
-    Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, ReadVolatile, VolatileMemoryError,
-    VolatileSlice, WriteVolatile,
+    Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, Permissions,
+    ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile,
 };
 use vm_migration::protocol::{Command, ConnectionRole, MemoryRangeTable, Request, Response};
 use vm_migration::tls::{TlsServerConfig, TlsStream};
 use vm_migration::{MigratableError, Snapshot};
 use vmm_sys_util::eventfd::EventFd;
+use zerocopy::IntoBytes;
 
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
 use crate::sync_utils::Gate;
@@ -237,6 +240,115 @@ impl WriteVolatile for SocketStream {
             SocketStream::Tcp(s) => s.write_volatile(buf),
             SocketStream::Tls(s) => s.write_volatile(buf),
         }
+    }
+}
+
+/// Maximum number of buffers a single vectored I/O call accepts (`IOV_MAX`).
+const MAX_IOV: usize = 1024;
+
+impl SocketStream {
+    /// Writes every buffer in `iovs`, retrying until all of them are written.
+    ///
+    /// `iovs` is left in an unspecified state.
+    ///
+    /// # Safety
+    ///
+    /// Each buffer must point to at least `iov_len` readable bytes for the
+    /// duration of the call.
+    unsafe fn write_all_iovecs(&mut self, iovs: &mut [libc::iovec]) -> Result<(), MigratableError> {
+        // TLS must go through rustls, which needs the data in a buffer anyway.
+        if let SocketStream::Tls(stream) = self {
+            // SAFETY: guaranteed by this function's contract.
+            return unsafe { stream.write_all_iovecs(iovs) }
+                .map_err(MigratableError::MigrateSocket);
+        }
+
+        let fd = self.as_fd().as_raw_fd();
+        let mut iovs = iovs;
+        while !iovs.is_empty() {
+            let count = iovs.len().min(MAX_IOV);
+            // SAFETY: `iovs` is valid for reads per this function's contract,
+            // and `count` does not exceed either the slice length or IOV_MAX.
+            let written = unsafe { libc::writev(fd, iovs.as_ptr(), count as libc::c_int) };
+
+            if written < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(MigratableError::MigrateSocket(error));
+            }
+
+            iovs = advance_iovecs(iovs, written as usize);
+        }
+
+        Ok(())
+    }
+}
+
+/// Drops the `count` bytes at the front of `iovs` that have been transferred
+/// and returns what is left.
+fn advance_iovecs(iovs: &mut [libc::iovec], mut count: usize) -> &mut [libc::iovec] {
+    let mut done = 0;
+    for iov in iovs.iter_mut() {
+        if count < iov.iov_len {
+            // SAFETY: the transferred bytes are part of this buffer, so the
+            // resulting pointer stays within it.
+            iov.iov_base = unsafe { iov.iov_base.byte_add(count) };
+            iov.iov_len -= count;
+            break;
+        }
+        count -= iov.iov_len;
+        done += 1;
+    }
+
+    &mut iovs[done..]
+}
+
+/// Buffers for one vectored write: pointers into host memory borrowed for
+/// `'a`, and into guest memory kept mapped by the collected [`PtrGuard`]s.
+#[derive(Default)]
+struct IoVecBatch<'a> {
+    iovs: Vec<libc::iovec>,
+    guards: Vec<PtrGuard>,
+    _borrowed: PhantomData<&'a [u8]>,
+}
+
+impl<'a> IoVecBatch<'a> {
+    fn push_bytes(&mut self, bytes: &'a [u8]) {
+        self.iovs.push(libc::iovec {
+            iov_base: bytes.as_ptr().cast_mut().cast(),
+            iov_len: bytes.len(),
+        });
+    }
+
+    fn push_guest_memory<B: BitmapSlice>(&mut self, slice: &VolatileSlice<'a, B>) {
+        let guard = slice.ptr_guard();
+        self.iovs.push(libc::iovec {
+            iov_base: guard.as_ptr().cast_mut().cast(),
+            iov_len: guard.len(),
+        });
+        self.guards.push(guard);
+    }
+
+    fn is_full(&self) -> bool {
+        self.iovs.len() >= MAX_IOV
+    }
+
+    /// Writes the collected buffers and empties the batch.
+    fn flush(&mut self, socket: &mut SocketStream) -> Result<(), MigratableError> {
+        if self.iovs.is_empty() {
+            return Ok(());
+        }
+
+        // SAFETY: every buffer points either into host memory borrowed for
+        // `'a` or into guest memory that `self.guards` keeps mapped. Both
+        // outlive this call.
+        let result = unsafe { socket.write_all_iovecs(&mut self.iovs) };
+
+        self.iovs.clear();
+        self.guards.clear();
+        result
     }
 }
 
@@ -1227,35 +1339,39 @@ pub(crate) fn send_memory_ranges(
         return Ok(());
     }
 
-    // Send the memory table
-    Request::memory(ranges.length()).write_to(socket)?;
-    ranges.write_to(socket)?;
-
-    // And then the memory itself
+    let request = Request::memory(ranges.length());
     let mem = guest_memory.memory();
-    for range in ranges.regions() {
-        let mut offset: u64 = 0;
-        // Here we are manually handling the retry in case we can't read the
-        // whole region at once because we can't use the implementation
-        // from vm-memory::GuestMemory of write_all_to() as it is not
-        // following the correct behavior. For more info about this issue
-        // see: https://github.com/rust-vmm/vm-memory/issues/174
-        loop {
-            let bytes_written = mem
-                .write_volatile_to(
-                    GuestAddress(range.gpa + offset),
-                    socket,
-                    (range.length - offset) as usize,
-                )
-                .context("Error transferring memory to socket")
-                .map_err(MigratableError::MigrateSend)?;
-            offset += bytes_written as u64;
 
-            if offset == range.length {
-                break;
+    // The request header, the range table and the guest memory of every range
+    // go out through as few syscalls as possible. A fragmented iteration can
+    // hold millions of single-page ranges, and one write(2) per range costs
+    // more than copying the data.
+    let mut batch = IoVecBatch::default();
+    batch.push_bytes(request.as_bytes());
+    batch.push_bytes(ranges.as_bytes());
+
+    for range in ranges.regions() {
+        let slices = mem
+            .get_slices(
+                GuestAddress(range.gpa),
+                range.length as usize,
+                Permissions::Read,
+            )
+            .context("Error accessing guest memory to transfer")
+            .map_err(MigratableError::MigrateSend)?;
+
+        for slice in slices {
+            let slice = slice
+                .context("Error accessing guest memory to transfer")
+                .map_err(MigratableError::MigrateSend)?;
+            batch.push_guest_memory(&slice);
+            if batch.is_full() {
+                batch.flush(socket)?;
             }
         }
     }
+    batch.flush(socket)?;
+
     expect_ok_response(
         socket,
         MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
@@ -1312,7 +1428,45 @@ pub(crate) fn receive_memory_ranges(
 
 #[cfg(test)]
 mod tests {
-    use super::tcp_address_to_server_name;
+    use super::{advance_iovecs, tcp_address_to_server_name};
+
+    fn iovecs(bufs: &[&[u8]]) -> Vec<libc::iovec> {
+        bufs.iter()
+            .map(|b| libc::iovec {
+                iov_base: b.as_ptr().cast_mut().cast(),
+                iov_len: b.len(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_advance_iovecs_partial_write() {
+        let (a, b, c) = ([0u8; 4], [0u8; 8], [0u8; 2]);
+        let mut iovs = iovecs(&[&a, &b, &c]);
+
+        // Nothing written: everything is left.
+        let rest = advance_iovecs(&mut iovs, 0);
+        assert_eq!(rest.len(), 3);
+
+        // Partially through the first buffer.
+        let rest = advance_iovecs(rest, 3);
+        assert_eq!(rest.len(), 3);
+        assert_eq!(rest[0].iov_len, 1);
+        assert_eq!(rest[0].iov_base, a[3..].as_ptr().cast_mut().cast());
+
+        // Exactly to a buffer boundary.
+        let rest = advance_iovecs(rest, 1);
+        assert_eq!(rest.len(), 2);
+        assert_eq!(rest[0].iov_len, 8);
+
+        // Across a buffer boundary.
+        let rest = advance_iovecs(rest, 9);
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].iov_len, 1);
+
+        // Everything written.
+        assert!(advance_iovecs(rest, 1).is_empty());
+    }
 
     #[test]
     fn test_tcp_address_to_server_name() {
