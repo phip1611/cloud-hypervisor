@@ -2303,61 +2303,10 @@ impl MemoryManager {
             }
         }
 
-        // Prefault the region if needed, in parallel.
         if prefault {
             let page_size =
                 Self::get_prefault_align_size(backing_file, hugepages, hugepage_size)? as usize;
-
-            if !is_aligned(size, page_size) {
-                warn!("Prefaulting memory size {size} misaligned with page size {page_size}");
-            }
-
-            let num_pages = size / page_size;
-
-            let num_threads = Self::get_prefault_num_threads(page_size, num_pages);
-
-            let pages_per_thread = num_pages / num_threads;
-            let remainder = num_pages % num_threads;
-
-            let barrier = Arc::new(Barrier::new(num_threads));
-            thread::scope(|s| -> Result<(), Error> {
-                let r = &region;
-                let mut handles = Vec::new();
-                for i in 0..num_threads {
-                    let barrier = Arc::clone(&barrier);
-                    let handle = s.spawn(move || {
-                        // Wait until all threads have been spawned to avoid contention
-                        // over mmap_sem between thread stack allocation and page faulting.
-                        barrier.wait();
-                        let pages = pages_per_thread + if i < remainder { 1 } else { 0 };
-                        let offset = page_size * ((i * pages_per_thread) + cmp::min(i, remainder));
-                        // SAFETY: FFI call with correct arguments
-                        let ret = unsafe {
-                            let addr = r.as_ptr().add(offset);
-                            libc::madvise(addr.cast(), pages * page_size, libc::MADV_POPULATE_WRITE)
-                        };
-                        if ret != 0 {
-                            let e = io::Error::last_os_error();
-                            return Err(e);
-                        }
-                        Ok(())
-                    });
-                    handles.push(handle);
-                }
-
-                for handle in handles {
-                    handle
-                        .join()
-                        .map_err(|e| {
-                            Error::PrefaultMemory(io::Error::other(format!(
-                                "Prefault thread panicked: {e:?}"
-                            )))
-                        })?
-                        .map_err(Error::PrefaultMemory)?;
-                }
-
-                Ok(())
-            })?;
+            prefault_memory(region.as_ptr(), size, page_size)?;
         }
 
         info!(
@@ -2611,6 +2560,29 @@ impl MemoryManager {
 
     pub fn guest_memory(&self) -> GuestMemoryAtomic<GuestMemoryMmap> {
         self.guest_memory.clone()
+    }
+
+    /// Populates the guest RAM that is backed by private anonymous memory.
+    ///
+    /// Regions backed by a file or a memfd are skipped: their content may
+    /// legitimately stay sparse, for example because the sender skips holes
+    /// of a shared file-backed region.
+    ///
+    /// Failures are reported to the caller but are not fatal for a migration:
+    /// the pages are faulted in by the transfer itself as well.
+    pub fn prefault_anonymous_regions(&self) -> Result<(), Error> {
+        // SAFETY: FFI call. Trivially safe.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+
+        for region in self.guest_memory.memory().iter() {
+            if region.file_offset().is_some() {
+                continue;
+            }
+
+            prefault_memory(region.as_ptr(), region.len() as usize, page_size)?;
+        }
+
+        Ok(())
     }
 
     pub fn boot_guest_memory(&self) -> GuestMemoryMmap {
@@ -3651,6 +3623,64 @@ impl Migratable for MemoryManager {
         }
         Ok(MemoryRangeTable::new_from_tables(tables))
     }
+}
+
+/// Populates `size` bytes at `addr` with `MADV_POPULATE_WRITE`, in parallel.
+///
+/// Faulting the pages in up front is much cheaper than taking one fault per
+/// page later on, and it lets the caller fail early if the memory cannot be
+/// backed at all.
+fn prefault_memory(addr: *mut u8, size: usize, page_size: usize) -> Result<(), Error> {
+    if !is_aligned(size, page_size) {
+        warn!("Prefaulting memory size {size} misaligned with page size {page_size}");
+    }
+
+    let num_pages = size / page_size;
+    let num_threads = MemoryManager::get_prefault_num_threads(page_size, num_pages);
+
+    let pages_per_thread = num_pages / num_threads;
+    let remainder = num_pages % num_threads;
+
+    // `*mut u8` is not `Send`, so pass the address as an integer instead.
+    let base = addr as usize;
+    let barrier = Arc::new(Barrier::new(num_threads));
+    thread::scope(|s| -> Result<(), Error> {
+        let mut handles = Vec::new();
+        for i in 0..num_threads {
+            let barrier = Arc::clone(&barrier);
+            let handle = s.spawn(move || {
+                // Wait until all threads have been spawned to avoid contention
+                // over mmap_sem between thread stack allocation and page faulting.
+                barrier.wait();
+                let pages = pages_per_thread + if i < remainder { 1 } else { 0 };
+                let offset = page_size * ((i * pages_per_thread) + cmp::min(i, remainder));
+                // SAFETY: FFI call with correct arguments
+                let ret = unsafe {
+                    let addr = (base + offset) as *mut libc::c_void;
+                    libc::madvise(addr, pages * page_size, libc::MADV_POPULATE_WRITE)
+                };
+                if ret != 0 {
+                    let e = io::Error::last_os_error();
+                    return Err(e);
+                }
+                Ok(())
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|e| {
+                    Error::PrefaultMemory(io::Error::other(format!(
+                        "Prefault thread panicked: {e:?}"
+                    )))
+                })?
+                .map_err(Error::PrefaultMemory)?;
+        }
+
+        Ok(())
+    })
 }
 
 // Reports whether every saved range is page-aligned and lies wholly inside a
