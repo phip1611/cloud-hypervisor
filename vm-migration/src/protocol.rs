@@ -600,12 +600,21 @@ impl MemoryRangeTable {
         self.data.extend(table.data);
     }
 
+    /// Merges the given tables into one, without reordering their ranges.
+    ///
+    /// The first table's allocation is reused, which matters because it is
+    /// typically the largest one: a dirty iteration of a large VM can contain
+    /// millions of ranges.
     pub fn new_from_tables(tables: Vec<Self>) -> Self {
-        let mut data = Vec::new();
+        let mut tables = tables.into_iter();
+        let Some(mut merged) = tables.next() else {
+            return Self::default();
+        };
+
         for table in tables {
-            data.extend(table.data);
+            merged.extend(table);
         }
-        Self { data }
+        merged
     }
 
     /// Returns the effective size in bytes.
