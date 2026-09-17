@@ -3635,14 +3635,14 @@ impl Migratable for MemoryManager {
 
             let sub_table = MemoryRangeTable::from_dirty_bitmap(dirty_bitmap, r.gpa, 4096);
 
-            if sub_table.regions().is_empty() {
-                debug!("Dirty Memory Range Table is empty");
-            } else {
-                debug!("Dirty Memory Range Table:");
-                for range in sub_table.regions() {
-                    debug!("GPA: {:x} size: {} (KiB)", range.gpa, range.length / 1024);
-                }
-            }
+            // Only a summary: a dirty iteration can contain millions of
+            // ranges, and logging each one costs more than the whole transfer.
+            debug!(
+                "Dirty memory range table for slot {}: ranges = {} size = {} KiB",
+                r.slot,
+                sub_table.regions().len(),
+                sub_table.effective_size() / 1024,
+            );
 
             table.extend(sub_table);
         }
