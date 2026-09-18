@@ -1421,8 +1421,12 @@ pub(crate) fn send_config(
     )
 }
 
-/// Serialize and send the VM snapshot payload.
-pub(crate) fn send_state(
+/// Serializes and sends the VM snapshot without waiting for the response.
+///
+/// The destination only answers once it restored the VM, which takes a while
+/// for a VM with many vCPUs or devices. Sending the next request meanwhile
+/// saves a round trip of the time the VM is stopped.
+pub(crate) fn send_state_request(
     socket: &mut SocketStream,
     snapshot: &Snapshot,
 ) -> Result<(), MigratableError> {
@@ -1432,7 +1436,12 @@ pub(crate) fn send_state(
     Request::state(snapshot_data.len() as u64).write_to(socket)?;
     socket
         .write_all(&snapshot_data)
-        .map_err(MigratableError::MigrateSocket)?;
+        .map_err(MigratableError::MigrateSocket)
+}
+
+/// Waits for the destination to acknowledge the VM state, which it does after
+/// restoring the VM.
+pub(crate) fn expect_state_response(socket: &mut SocketStream) -> Result<(), MigratableError> {
     expect_ok_response(
         socket,
         MigratableError::MigrateSend(anyhow!("Error during state migration")),

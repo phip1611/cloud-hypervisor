@@ -1938,22 +1938,27 @@ impl Vmm {
                 Ok(snapshot)
             })?;
 
-            let (_, send_snapshot_duration) =
-                measure_ok(|| transport::send_state(&mut socket, &vm_snapshot))?;
-
-            // Complete the migration.
-            // When this returns, we know the VM was resumed (if it was running
-            // before the migration) and that the receiving VMM acquired disk
-            // locks again.
+            // Hand the VM state over and ask to complete the migration right
+            // away. The destination restores the VM before it answers the
+            // state request, so the completion request travels while it does
+            // that, and the VM is resumed one round trip earlier.
+            //
+            // When the completion is acknowledged, we know the VM was resumed
+            // (if it was running before the migration) and that the receiving
+            // VMM acquired the disk locks again.
             let complete_req = if initial_vm_state == VmState::Running {
                 Request::complete()
             } else {
                 Request::complete_paused()
             };
+            let (_, send_snapshot_duration) = measure_ok(|| {
+                transport::send_state_request(&mut socket, &vm_snapshot)?;
+                complete_req.write_to(&mut socket)?;
+                transport::expect_state_response(&mut socket)
+            })?;
             let (_, complete_duration) = measure_ok(|| {
-                transport::send_request_expect_ok(
+                transport::expect_ok_response(
                     &mut socket,
-                    complete_req,
                     MigratableError::MigrateSend(anyhow!("Error completing migration")),
                 )
             })?;
