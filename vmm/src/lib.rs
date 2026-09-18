@@ -1651,6 +1651,7 @@ impl Vmm {
         if vm.get_state() != VmState::Paused {
             vm.pause()?;
         }
+        let pause_dur = downtime_begin.elapsed();
 
         // Send last batch of dirty pages: final iteration
         {
@@ -1677,7 +1678,7 @@ impl Vmm {
         }
         mem_ctx.finalize();
         info!("Precopy complete: {mem_ctx}");
-        ctx.set_vm_paused(downtime_begin, mem_ctx)
+        ctx.set_vm_paused(downtime_begin, pause_dur, mem_ctx)
             .expect("migration context should transition to VmPaused after memory migration");
 
         Ok(())
@@ -1825,6 +1826,7 @@ impl Vmm {
                 }
                 ctx.set_vm_paused(
                     downtime_begin,
+                    downtime_begin.elapsed(),
                     // No memory was transferred
                     MemoryMigrationContext::empty_finalized(),
                 )
@@ -1938,12 +1940,12 @@ impl Vmm {
             .expect("migration context should finalize after memory migration completed");
 
         info!(
-            "Migration completed after {:.1}s with a downtime of {}ms (goal was {}ms)",
+            "Migration completed after {:.1}s with a downtime of {:.2}ms (goal was {}ms)",
             ctx.migration_dur.as_secs_f32(),
-            ctx.downtime_ctx.effective_downtime.as_millis(),
+            ctx.downtime_ctx.effective_downtime.as_secs_f64() * 1000.0,
             send_data_migration.downtime().as_millis()
         );
-        debug!("Downtime breakdown: {}", ctx.downtime_ctx);
+        info!("Downtime breakdown: {}", ctx.downtime_ctx);
 
         // Stop logging dirty pages
         if matches!(memory_mode, MigrationMode::Precopy) {

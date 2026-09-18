@@ -42,6 +42,30 @@ pub struct DowntimeContext {
     /// The time of the completion request. This includes resuming the VM (if it
     /// was running before the migration).
     pub complete_dur: Duration,
+    /// The time needed to pause the VM, i.e. its vCPUs and devices.
+    pub pause_dur: Duration,
+}
+
+impl DowntimeContext {
+    /// The part of the downtime that none of the other durations covers, such
+    /// as releasing the disk locks.
+    pub fn unaccounted(&self) -> Duration {
+        self.effective_downtime.saturating_sub(
+            self.pause_dur
+                + self.final_memory_iteration_dur
+                + self.state_dur
+                + self.send_state_dur
+                + self.complete_dur,
+        )
+    }
+}
+
+/// Formats a duration as milliseconds with a sub-millisecond fraction.
+///
+/// Downtimes are often a few milliseconds, where whole milliseconds hide both
+/// the individual steps and the differences between migrations.
+fn as_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 impl Display for DowntimeContext {
@@ -49,12 +73,15 @@ impl Display for DowntimeContext {
         write!(
             f,
             // Caution: This format is specifically crafted for the VMM log
-            "{}ms (final_iter:{}ms state:{}ms send_state:{}ms complete:{}ms)",
-            self.effective_downtime.as_millis(),
-            self.final_memory_iteration_dur.as_millis(),
-            self.state_dur.as_millis(),
-            self.send_state_dur.as_millis(),
-            self.complete_dur.as_millis()
+            "{:.2}ms (pause:{:.2}ms final_iter:{:.2}ms state:{:.2}ms \
+             send_state:{:.2}ms complete:{:.2}ms other:{:.2}ms)",
+            as_ms(self.effective_downtime),
+            as_ms(self.pause_dur),
+            as_ms(self.final_memory_iteration_dur),
+            as_ms(self.state_dur),
+            as_ms(self.send_state_dur),
+            as_ms(self.complete_dur),
+            as_ms(self.unaccounted()),
         )
     }
 }
@@ -78,6 +105,7 @@ impl CompletedMigrationContext {
     fn new(
         migration_dur: Duration,
         effective_downtime: Duration,
+        pause_dur: Duration,
         state_dur: Duration,
         send_state_dur: Duration,
         complete_dur: Duration,
@@ -91,6 +119,7 @@ impl CompletedMigrationContext {
                 state_dur,
                 send_state_dur,
                 complete_dur,
+                pause_dur,
             },
             memory_ctx,
         }
@@ -129,6 +158,8 @@ pub enum OngoingMigrationContext {
         migration_begin: Instant,
         /// Downtime begin of the migration.
         downtime_begin: Instant,
+        /// The time it took to pause the VM.
+        pause_dur: Duration,
         /// The finalized context of the memory migration.
         finalized_memory_ctx: MemoryMigrationContext,
     },
@@ -147,6 +178,7 @@ impl OngoingMigrationContext {
     pub fn set_vm_paused(
         &mut self,
         downtime_begin: Instant,
+        pause_dur: Duration,
         finalized_memory_ctx: MemoryMigrationContext,
     ) -> Result<(), MigrationContextError> {
         if finalized_memory_ctx.migration_duration.is_none() {
@@ -159,6 +191,7 @@ impl OngoingMigrationContext {
         *self = Self::VmPaused {
             migration_begin,
             downtime_begin,
+            pause_dur,
             finalized_memory_ctx,
         };
         Ok(())
@@ -184,18 +217,25 @@ impl OngoingMigrationContext {
         send_state_dur: Duration,
         complete_dur: Duration,
     ) -> Result<CompletedMigrationContext, MigrationContextError> {
-        let (migration_begin, downtime_begin, finalized_memory_ctx) = match self {
+        let (migration_begin, downtime_begin, pause_dur, finalized_memory_ctx) = match self {
             Self::VmPaused {
                 migration_begin,
                 downtime_begin,
+                pause_dur,
                 finalized_memory_ctx,
-            } => (migration_begin, downtime_begin, finalized_memory_ctx),
+            } => (
+                migration_begin,
+                downtime_begin,
+                pause_dur,
+                finalized_memory_ctx,
+            ),
             _ => return Err(MigrationContextError::InvalidFinalizeTransition),
         };
 
         Ok(CompletedMigrationContext::new(
             migration_begin.elapsed(),
             downtime_begin.elapsed(),
+            pause_dur,
             state_dur,
             send_state_dur,
             complete_dur,
@@ -468,7 +508,7 @@ mod tests {
             let mut memory_ctx = MemoryMigrationContext::new();
             memory_ctx.finalize();
 
-            ctx.set_vm_paused(downtime_begin, memory_ctx)
+            ctx.set_vm_paused(downtime_begin, Duration::from_micros(500), memory_ctx)
                 .expect("migration context should transition to VmPaused after memory migration");
 
             assert!(matches!(
@@ -488,7 +528,7 @@ mod tests {
             let mut memory_ctx = MemoryMigrationContext::new();
             memory_ctx.finalize();
 
-            ctx.set_vm_paused(downtime_begin, memory_ctx)
+            ctx.set_vm_paused(downtime_begin, Duration::from_micros(500), memory_ctx)
                 .expect("migration context should transition to VmPaused after memory migration");
 
             let completed = ctx
@@ -508,6 +548,10 @@ mod tests {
                 completed.downtime_ctx.complete_dur,
                 Duration::from_millis(3)
             );
+            assert_eq!(completed.downtime_ctx.pause_dur, Duration::from_micros(500));
+            // 0.5ms pause + 1ms state + 2ms send_state + 3ms complete of a
+            // downtime that is at least 10ms.
+            assert!(completed.downtime_ctx.unaccounted() >= Duration::from_micros(3500));
             assert!(completed.downtime_ctx.effective_downtime >= Duration::from_millis(10));
             assert!(completed.migration_dur > Duration::ZERO);
             assert!(completed.memory_ctx.migration_duration.is_some());
