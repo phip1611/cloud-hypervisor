@@ -1684,6 +1684,15 @@ impl Vmm {
             |ctx| Self::is_precopy_converged(ctx, send_data_migration, fixed_downtime),
             mem_send,
         )?;
+        // Flush the disk images before stopping the VM. Pausing the block
+        // devices flushes their cached format metadata, and for qcow2 that is
+        // a full sync of the image: with dirty metadata this can take longer
+        // than everything else in the downtime together.
+        if let Err(e) = vm.flush_disks() {
+            let msg = flatten_error_chain_to_string(&e);
+            warn!("Could not flush the disk images before pausing the VM: {msg}");
+        }
+
         let downtime_begin = Instant::now();
         if vm.get_state() != VmState::Paused {
             vm.pause()?;

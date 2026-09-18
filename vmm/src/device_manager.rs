@@ -607,6 +607,10 @@ pub enum DeviceManagerError {
     #[error("Cannot lock images of all block devices")]
     DiskLockError(#[source] VirtioBlockError),
 
+    /// Cannot flush images of all block devices.
+    #[error("Cannot flush images of all block devices")]
+    DiskFlushError(#[source] VirtioBlockError),
+
     #[cfg(feature = "fw_cfg")]
     /// Error adding fw_cfg to bus.
     #[error("Error adding fw_cfg to bus")]
@@ -2561,6 +2565,19 @@ impl DeviceManager {
             let mut dev = dev.lock().unwrap();
             dev.try_lock_image()
                 .map_err(DeviceManagerError::DiskLockError)?;
+        }
+        Ok(())
+    }
+
+    /// Flushes the cached format metadata of all disk images.
+    ///
+    /// Pausing the devices flushes as well, but that happens while the VM is
+    /// stopped. Flushing beforehand keeps that flush short.
+    pub fn flush_disks(&self) -> DeviceManagerResult<()> {
+        for dev in &self.block_devices {
+            let mut dev = dev.lock().unwrap();
+            dev.sync_metadata()
+                .map_err(DeviceManagerError::DiskFlushError)?;
         }
         Ok(())
     }

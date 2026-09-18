@@ -3073,6 +3073,18 @@ impl Vm {
         self.device_manager.lock().unwrap().device_tree()
     }
 
+    /// Flushes the cached format metadata of all disk images.
+    ///
+    /// Called before the VM is paused for the final migration step so that the
+    /// flush the pause itself performs stays short.
+    pub fn flush_disks(&self) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .flush_disks()
+            .map_err(Error::DeviceManager)
+    }
+
     /// Release all advisory locks held for the disk images.
     ///
     /// This should only be called when the VM is stopped and the VMM supposed

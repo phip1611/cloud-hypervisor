@@ -78,6 +78,8 @@ pub enum Error {
     MissingEntryRequestList,
     #[error("Failed synchronizing the file")]
     Fsync(#[source] AsyncIoError),
+    #[error("Failed synchronizing the disk image metadata")]
+    SyncMetadata(#[source] BlockError),
     #[error("Failed adding used index")]
     QueueAddUsed(#[source] virtio_queue::Error),
     #[error("Failed creating an iterator over the queue")]
@@ -993,6 +995,16 @@ impl Block {
     }
 
     /// Tries to set an advisory lock for the corresponding disk image.
+    /// Flushes cached format metadata, for example qcow2 L2 and refcount
+    /// tables, without pausing the device.
+    ///
+    /// Pausing flushes as well, but that flush happens while the VM is
+    /// stopped. Flushing beforehand leaves it only the metadata that the
+    /// guest dirtied since.
+    pub fn sync_metadata(&mut self) -> Result<()> {
+        self.disk_image.sync_metadata().map_err(Error::SyncMetadata)
+    }
+
     pub fn try_lock_image(&mut self) -> Result<()> {
         let lock_type = match self.read_only() {
             true => LockType::Read,
