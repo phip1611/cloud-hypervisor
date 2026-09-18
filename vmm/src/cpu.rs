@@ -17,7 +17,7 @@ use std::io::Write;
 use std::mem::zeroed;
 use std::os::unix::thread::JoinHandleExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::{any, cmp, hint, io, panic, result, thread, time};
 
 #[cfg(target_arch = "aarch64")]
@@ -767,6 +767,60 @@ impl TryFrom<i32> for CoreSchedulingLeader {
     }
 }
 
+/// How long to wait for a vCPU to acknowledge a signal before kicking it again.
+const VCPU_SIGNAL_RETRY_INTERVAL: time::Duration = time::Duration::from_millis(10);
+
+/// How long a vCPU may take to acknowledge a signal before giving up.
+const VCPU_SIGNAL_ACK_TIMEOUT: time::Duration = time::Duration::from_millis(1000);
+
+/// How long to wait for a vCPU state change before warning about it.
+const VCPU_ACK_WARN_INTERVAL: time::Duration = time::Duration::from_secs(1);
+
+/// Wakes up whoever waits for a vCPU thread to acknowledge a state change.
+///
+/// The vCPU threads publish their state through the atomics of [`VcpuState`];
+/// this type only carries the wakeup, so waiters do not have to poll. Waiting
+/// for a vCPU to park or to resume is part of the VM pause and resume paths,
+/// and therefore of the live-migration downtime.
+#[derive(Default)]
+struct VcpuAck {
+    /// Only held to order a flag update against a waiter that is about to
+    /// block, so that no notification can be lost.
+    lock: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl VcpuAck {
+    /// Wakes all waiters. Call this after updating the acknowledged flag.
+    fn notify(&self) {
+        drop(self.lock.lock().unwrap());
+        self.condvar.notify_all();
+    }
+
+    /// Blocks until `acknowledged` reports true or `timeout` elapsed, and
+    /// returns whether it was acknowledged.
+    fn wait_for(&self, timeout: time::Duration, acknowledged: impl Fn() -> bool) -> bool {
+        let start = time::Instant::now();
+        let mut guard = self.lock.lock().unwrap();
+        loop {
+            if acknowledged() {
+                return true;
+            }
+            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
+                return false;
+            };
+            guard = self.condvar.wait_timeout(guard, remaining).unwrap().0;
+        }
+    }
+
+    /// Blocks until `acknowledged` reports true, warning periodically.
+    fn wait_until(&self, what: &str, acknowledged: impl Fn() -> bool) {
+        while !self.wait_for(VCPU_ACK_WARN_INTERVAL, &acknowledged) {
+            warn!("Still waiting for vCPU thread to {what}");
+        }
+    }
+}
+
 /// Management structure for a vCPU (thread).
 #[derive(Default)]
 struct VcpuState {
@@ -781,6 +835,8 @@ struct VcpuState {
     vcpu_run_interrupted: Arc<AtomicBool>,
     /// Used to ACK state changes from the run vCPU loop to the CPU Manager.
     paused: Arc<AtomicBool>,
+    /// Notifies waiters about updates of the two ACK flags above.
+    ack: Arc<VcpuAck>,
 }
 
 impl VcpuState {
@@ -813,25 +869,36 @@ impl VcpuState {
     ///
     /// This is the counterpart of [`Self::signal_thread`].
     fn wait_until_signal_acknowledged(&self) -> Result<()> {
-        if let Some(_handle) = self.handle.as_ref() {
-            let mut count = 0;
-            loop {
-                if self.vcpu_run_interrupted.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
-                // This is more effective than thread::yield_now() at
-                // avoiding a priority inversion with the vCPU thread
-                thread::sleep(time::Duration::from_millis(1));
-                count += 1;
-                if count >= 1000 {
-                    return Err(Error::SignalAcknowledgeTimeout);
-                } else if count % 10 == 0 {
-                    warn!("vCPU thread did not respond in {count}ms to signal - retrying");
-                    self.signal_thread();
-                }
-            }
+        if self.handle.is_none() {
+            return Ok(());
         }
-        Ok(())
+
+        let interrupted = || self.vcpu_run_interrupted.load(Ordering::SeqCst);
+        let mut waited = time::Duration::ZERO;
+        while waited < VCPU_SIGNAL_ACK_TIMEOUT {
+            if self.ack.wait_for(VCPU_SIGNAL_RETRY_INTERVAL, interrupted) {
+                return Ok(());
+            }
+            waited += VCPU_SIGNAL_RETRY_INTERVAL;
+
+            let ms = waited.as_millis();
+            warn!("vCPU thread did not respond in {ms}ms to signal - retrying");
+            self.signal_thread();
+        }
+
+        Err(Error::SignalAcknowledgeTimeout)
+    }
+
+    /// Blocks until the vCPU thread parked itself.
+    fn wait_until_parked(&self) {
+        self.ack
+            .wait_until("park", || self.paused.load(Ordering::SeqCst));
+    }
+
+    /// Blocks until the vCPU thread left its park loop.
+    fn wait_until_unparked(&self) {
+        self.ack
+            .wait_until("resume", || !self.paused.load(Ordering::SeqCst));
     }
 
     fn join_thread(&mut self) -> Result<()> {
@@ -1215,6 +1282,8 @@ impl CpuManager {
             Arc::clone(&vcpu_states[usize::try_from(vcpu_id).unwrap()].vcpu_run_interrupted);
         let panic_vcpu_run_interrupted = Arc::clone(&vcpu_run_interrupted);
         let vcpu_paused = Arc::clone(&vcpu_states[usize::try_from(vcpu_id).unwrap()].paused);
+        let vcpu_ack = Arc::clone(&vcpu_states[usize::try_from(vcpu_id).unwrap()].ack);
+        let panic_vcpu_ack = Arc::clone(&vcpu_ack);
 
         // Prepare the CPU set the current vCPU is expected to run onto.
         let cpuset = self.affinity.get(&vcpu_id).map(|host_cpus| {
@@ -1380,17 +1449,21 @@ impl CpuManager {
                                 }
 
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                vcpu_ack.notify();
 
                                 vcpu_paused.store(true, Ordering::SeqCst);
+                                vcpu_ack.notify();
                                 while vcpus_pause_signalled.load(Ordering::SeqCst) {
                                     thread::park();
                                 }
                                 vcpu_paused.store(false, Ordering::SeqCst);
                                 vcpu_run_interrupted.store(false, Ordering::SeqCst);
+                                vcpu_ack.notify();
                             }
 
                             if vcpus_kick_signalled.load(Ordering::SeqCst) {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                vcpu_ack.notify();
                                 #[cfg(target_arch = "x86_64")]
                                 match vcpu.lock().as_ref().unwrap().vcpu.nmi() {
                                     Ok(()) => {},
@@ -1406,6 +1479,7 @@ impl CpuManager {
                                 || vcpu_kill.load(Ordering::SeqCst)
                             {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                vcpu_ack.notify();
                                 break;
                             }
 
@@ -1439,12 +1513,14 @@ impl CpuManager {
                                     VmExit::Reset => {
                                         info!("VmExit::Reset");
                                         vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                        vcpu_ack.notify();
                                         reset_evt.write(1).unwrap();
                                         break;
                                     }
                                     VmExit::Shutdown => {
                                         info!("VmExit::Shutdown");
                                         vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                        vcpu_ack.notify();
                                         guest_exit_evt.write(1).unwrap();
                                         break;
                                     }
@@ -1466,6 +1542,7 @@ impl CpuManager {
                                 Err(e) => {
                                     error!("VCPU generated error: {:?}", Error::VcpuRun(e.into()));
                                     vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                    vcpu_ack.notify();
                                     exit_evt.write(1).unwrap();
                                     break;
                                 }
@@ -1476,12 +1553,14 @@ impl CpuManager {
                                 || vcpu_kill.load(Ordering::SeqCst)
                             {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                vcpu_ack.notify();
                                 break;
                             }
                         }
                     })
                     .or_else(|_| {
                         panic_vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                        panic_vcpu_ack.notify();
                         error!("vCPU thread panicked");
                         panic_exit_evt.write(1)
                     })
@@ -2766,13 +2845,13 @@ impl Pausable for CpuManager {
 
         // The vCPU thread will change its paused state before parking, wait here for each
         // activated vCPU change their state to ensure they have parked.
-        for state in self.vcpu_states.lock().unwrap().iter() {
-            if state.active() {
-                // wait for vCPU to update state
-                while !state.paused.load(Ordering::SeqCst) {
-                    // To avoid a priority inversion with the vCPU thread
-                    thread::sleep(time::Duration::from_millis(1));
-                }
+        //
+        // Do not hold `vcpu_states` across the wait, see `signal_vcpus()`.
+        let vcpu_count = self.vcpu_states.lock().unwrap().len();
+        for cpu_id in 0..vcpu_count {
+            let vcpu_states = self.vcpu_states.lock().unwrap();
+            if vcpu_states[cpu_id].active() {
+                vcpu_states[cpu_id].wait_until_parked();
             }
         }
 
@@ -2784,25 +2863,22 @@ impl Pausable for CpuManager {
         // their run vCPU loop.
         self.vcpus_pause_signalled.store(false, Ordering::SeqCst);
 
-        let vcpu_states = self.vcpu_states.lock().unwrap();
-
         // Unpark all the vCPU threads.
+        //
+        // As in `signal_vcpus()`, this is split into a signal and a wait phase,
+        // and `vcpu_states` is not held across the wait.
+        let vcpu_count = self.vcpu_states.lock().unwrap().len();
         // Step 1/2: signal each thread
-        {
-            for state in vcpu_states.iter() {
-                state.unpark_thread();
-            }
+        for cpu_id in 0..vcpu_count {
+            let vcpu_states = self.vcpu_states.lock().unwrap();
+            vcpu_states[cpu_id].unpark_thread();
         }
         // Step 2/2: wait for state ACK
-        {
-            for state in vcpu_states.iter() {
-                // wait for vCPU to update state
-                while state.paused.load(Ordering::SeqCst) {
-                    // To avoid a priority inversion with the vCPU thread
-                    thread::sleep(time::Duration::from_millis(1));
-                }
-            }
+        for cpu_id in 0..vcpu_count {
+            let vcpu_states = self.vcpu_states.lock().unwrap();
+            vcpu_states[cpu_id].wait_until_unparked();
         }
+
         Ok(())
     }
 }
