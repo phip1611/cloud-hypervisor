@@ -3455,7 +3455,7 @@ impl CpuElf64Writable for CpuManager {
             buf.resize(note_size as usize, 0);
 
             coredump_file
-                .write(&buf)
+                .write_all(&buf)
                 .map_err(GuestDebuggableError::CoredumpFile)?;
         }
 
@@ -3576,7 +3576,7 @@ impl CpuElf64Writable for CpuManager {
             buf.resize(note_size as usize, 0);
 
             coredump_file
-                .write(&buf)
+                .write_all(&buf)
                 .map_err(GuestDebuggableError::CoredumpFile)?;
         }
 
