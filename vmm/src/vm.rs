@@ -1496,7 +1496,7 @@ impl Vm {
         let address = GuestAddress(address);
 
         guest_mem
-            .read_volatile_from(address, initramfs, size)
+            .read_exact_volatile_from(address, initramfs, size)
             .map_err(Error::InitramfsRead)?;
 
         info!("Initramfs loaded: address = 0x{:x}", address.0);
