@@ -33,13 +33,22 @@ vm-migration = { path = "../vm-migration" }
 vmm-sys-util = { workspace = true }
 zerocopy = { workspace = true, features = ["alloc", "derive"], optional = true }
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+vm-virtio = { path = "../vm-virtio", optional = true }
+
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 iommufd-bindings = { workspace = true }
 iommufd-ioctls = { workspace = true }
 
 [features]
 default = []
-fw_cfg = ["arch/fw_cfg", "bitfield-struct", "linux-loader", "zerocopy"]
+fw_cfg = [
+  "arch/fw_cfg",
+  "bitfield-struct",
+  "linux-loader",
+  "vm-virtio",
+  "zerocopy",
+]
 ivshmem = []
 kvm = ["arch/kvm"]
 pvmemcontrol = []
