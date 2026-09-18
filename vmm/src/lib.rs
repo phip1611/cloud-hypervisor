@@ -1784,13 +1784,16 @@ impl Vmm {
             vm.start_migration()?;
         }
 
-        // Memory transfer
+        // Memory transfer. The worker pool outlives this block: the VM is
+        // stopped from here until the destination acknowledges `Complete`, and
+        // joining the workers in between would extend the downtime.
+        let mut mem_send = None;
         match (memory_mode, &mut socket) {
             (
                 MigrationMode::Precopy,
                 SocketStream::Unix(_) | SocketStream::Tcp(_) | SocketStream::Tls(_),
             ) => {
-                let mut mem_send = SendAdditionalConnections::new(
+                let mut connections = SendAdditionalConnections::new(
                     &send_data_migration.destination_url,
                     send_data_migration.connections,
                     send_data_migration.tls_dir.as_deref(),
@@ -1802,16 +1805,17 @@ impl Vmm {
                     vm,
                     &mut socket,
                     send_data_migration,
-                    &mut mem_send,
+                    &mut connections,
                     &mut ctx,
                 )
                 .inspect_err(|_| {
-                    if let Err(e) = mem_send.cleanup_workers() {
+                    if let Err(e) = connections.cleanup_workers() {
                         let msg = flatten_error_chain_to_string(&e);
                         warn!("Error cleaning up migration connections: {msg}");
                     }
                 })?;
-                mem_send.cleanup_workers()?;
+                // Joined after the downtime, see below.
+                mem_send = Some(connections);
             }
             // No need for precopy: just pause VM
             (MigrationMode::MemFDs, SocketStream::Unix(_)) | (MigrationMode::Postcopy, _) => {
@@ -1835,73 +1839,99 @@ impl Vmm {
             }
         }
 
-        // We release the locks early to enable locking them on the destination host.
-        // The VM is already stopped.
-        // Keep the locks held if the source VM must be preserved.
-        if !send_data_migration.preserve_source {
-            // Inner error cannot be wrapped in anyhow::Error => print it
-            vm.release_disk_locks().map_err(|e| {
-                MigratableError::UnlockError(anyhow!("{}", flatten_error_chain_to_string(&e)))
+        // Everything from the pause above until the destination acknowledges
+        // `Complete` runs with the VM stopped, so it is part of the downtime.
+        let paused_phase = (|| -> result::Result<_, MigratableError> {
+            // We release the locks early to enable locking them on the destination host.
+            // The VM is already stopped.
+            // Keep the locks held if the source VM must be preserved.
+            if !send_data_migration.preserve_source {
+                // Inner error cannot be wrapped in anyhow::Error => print it
+                vm.release_disk_locks().map_err(|e| {
+                    MigratableError::UnlockError(anyhow!("{}", flatten_error_chain_to_string(&e)))
+                })?;
+            }
+
+            // For postcopy, serve faults before sending State so the destination
+            // can fault pages in during restore.
+            let postcopy_handle = if matches!(memory_mode, MigrationMode::Postcopy) {
+                let fault_stream = transport::open_fault_connection(
+                    &send_data_migration.destination_url,
+                    send_data_migration.tls_dir.as_deref(),
+                )?;
+                let guest_memory = vm.guest_memory();
+
+                let seccomp_filters_clone = seccomp_filters.clone();
+                let handle = thread::Builder::new()
+                    .name("migrate-send-postcopy".to_owned())
+                    .spawn(move || {
+                        Self::serve_postcopy(
+                            &seccomp_filters_clone.postcopy_server,
+                            fault_stream,
+                            guest_memory,
+                        )
+                    })
+                    .context("Spawning postcopy serve thread")
+                    .map_err(MigratableError::MigrateSend)?;
+                Some(handle)
+            } else {
+                None
+            };
+
+            let (vm_snapshot, snapshot_duration) = measure_ok(|| {
+                // Capture snapshot. This may have side effects, e.g. vhost-user backend inflight drain
+                let snapshot = vm.snapshot()?;
+
+                // One final memory iteration to handle side effects from snapshot.
+                if matches!(memory_mode, MigrationMode::Precopy) {
+                    let memory_ranges = vm.dirty_log()?;
+                    transport::send_memory_ranges(&vm.guest_memory(), &memory_ranges, &mut socket)?;
+                }
+                Ok(snapshot)
             })?;
+
+            let (_, send_snapshot_duration) =
+                measure_ok(|| transport::send_state(&mut socket, &vm_snapshot))?;
+
+            // Complete the migration.
+            // When this returns, we know the VM was resumed (if it was running
+            // before the migration) and that the receiving VMM acquired disk
+            // locks again.
+            let complete_req = if initial_vm_state == VmState::Running {
+                Request::complete()
+            } else {
+                Request::complete_paused()
+            };
+            let (_, complete_duration) = measure_ok(|| {
+                transport::send_request_expect_ok(
+                    &mut socket,
+                    complete_req,
+                    MigratableError::MigrateSend(anyhow!("Error completing migration")),
+                )
+            })?;
+
+            Ok((
+                postcopy_handle,
+                snapshot_duration,
+                send_snapshot_duration,
+                complete_duration,
+            ))
+        })();
+
+        // The VM runs again on the destination: join the memory send workers
+        // now rather than while it was stopped.
+        if let Some(mut connections) = mem_send {
+            let joined = connections.cleanup_workers();
+            if paused_phase.is_ok() {
+                joined?;
+            } else if let Err(e) = joined {
+                let msg = flatten_error_chain_to_string(&e);
+                warn!("Error cleaning up migration connections: {msg}");
+            }
         }
 
-        // For postcopy, serve faults before sending State so the destination
-        // can fault pages in during restore.
-        let postcopy_handle = if matches!(memory_mode, MigrationMode::Postcopy) {
-            let fault_stream = transport::open_fault_connection(
-                &send_data_migration.destination_url,
-                send_data_migration.tls_dir.as_deref(),
-            )?;
-            let guest_memory = vm.guest_memory();
-
-            let seccomp_filters_clone = seccomp_filters.clone();
-            let handle = thread::Builder::new()
-                .name("migrate-send-postcopy".to_owned())
-                .spawn(move || {
-                    Self::serve_postcopy(
-                        &seccomp_filters_clone.postcopy_server,
-                        fault_stream,
-                        guest_memory,
-                    )
-                })
-                .context("Spawning postcopy serve thread")
-                .map_err(MigratableError::MigrateSend)?;
-            Some(handle)
-        } else {
-            None
-        };
-
-        let (vm_snapshot, snapshot_duration) = measure_ok(|| {
-            // Capture snapshot. This may have side effects, e.g. vhost-user backend inflight drain
-            let snapshot = vm.snapshot()?;
-
-            // One final memory iteration to handle side effects from snapshot.
-            if matches!(memory_mode, MigrationMode::Precopy) {
-                let memory_ranges = vm.dirty_log()?;
-                transport::send_memory_ranges(&vm.guest_memory(), &memory_ranges, &mut socket)?;
-            }
-            Ok(snapshot)
-        })?;
-
-        let (_, send_snapshot_duration) =
-            measure_ok(|| transport::send_state(&mut socket, &vm_snapshot))?;
-
-        // Complete the migration.
-        // When this returns, we know the VM was resumed (if it was running
-        // before the migration) and that the receiving VMM acquired disk
-        // locks again.
-        let complete_req = if initial_vm_state == VmState::Running {
-            Request::complete()
-        } else {
-            Request::complete_paused()
-        };
-        let (_, complete_duration) = measure_ok(|| {
-            transport::send_request_expect_ok(
-                &mut socket,
-                complete_req,
-                MigratableError::MigrateSend(anyhow!("Error completing migration")),
-            )
-        })?;
+        let (postcopy_handle, snapshot_duration, send_snapshot_duration, complete_duration) =
+            paused_phase?;
 
         let ctx = ctx
             .finalize(snapshot_duration, send_snapshot_duration, complete_duration)
