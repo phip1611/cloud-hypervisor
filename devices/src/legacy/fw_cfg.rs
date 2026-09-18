@@ -600,9 +600,9 @@ impl FwCfg {
         let dma_access = match self
             .memory
             .memory()
-            .read(access.as_mut_bytes(), GuestAddress(dma_address))
+            .read_slice(access.as_mut_bytes(), GuestAddress(dma_address))
         {
-            Ok(_) => access,
+            Ok(()) => access,
             Err(e) => {
                 error!("fw_cfg: invalid address of dma access {dma_address:#x}: {e:?}");
                 return;
@@ -629,7 +629,7 @@ impl FwCfg {
             error!("fw_cfg: dma operation {dma_access:x?}: {e:x?}");
             access_resp.set_error(true);
         }
-        if let Err(e) = self.memory.memory().write(
+        if let Err(e) = self.memory.memory().write_slice(
             &access_resp.0.to_be_bytes(),
             GuestAddress(dma_address + core::mem::offset_of!(FwCfgDmaAccess, control_be) as u64),
         ) {
