@@ -1043,11 +1043,7 @@ impl CpuManager {
         })))
     }
 
-    fn create_vcpu(
-        &mut self,
-        cpu_id: u32,
-        snapshot: Option<&Snapshot>,
-    ) -> Result<Arc<Mutex<Vcpu>>> {
+    fn create_vcpu(&mut self, cpu_id: u32, state: Option<CpuState>) -> Result<Arc<Mutex<Vcpu>>> {
         debug!("Creating vCPU: cpu_id = {cpu_id}");
 
         #[cfg(target_arch = "x86_64")]
@@ -1068,11 +1064,7 @@ impl CpuManager {
             self.msr_config_update.clone(),
         )?;
 
-        if let Some(snapshot) = snapshot {
-            let state: CpuState = snapshot.to_state().map_err(|e| {
-                Error::VcpuCreate(anyhow!("Could not get vCPU state from snapshot {e:?}"))
-            })?;
-
+        if let Some(state) = state {
             #[cfg(target_arch = "aarch64")]
             {
                 vcpu.init(self.vm.as_ref())?;
@@ -1188,14 +1180,40 @@ impl CpuManager {
             return Err(Error::DesiredVCpuCountExceedsMax);
         }
 
-        // Only create vCPUs in excess of all the allocated vCPUs.
-        for cpu_id in self.vcpus.len() as u32..desired_vcpus {
-            vcpus.push(self.create_vcpu(
-                cpu_id,
-                // TODO: The special format of the CPU id can be removed once
-                // ready to break live upgrade.
-                snapshot_from_id(snapshot, cpu_id.to_string().as_str()),
-            )?);
+        let new_cpu_ids = self.vcpus.len() as u32..desired_vcpus;
+
+        // Deserializing a vCPU state is the most expensive part of restoring
+        // it, and it is independent per vCPU: about 16ms for 200 vCPUs, while
+        // the VM is stopped. Do it for all of them first, in parallel.
+        //
+        // TODO: The special format of the CPU id can be removed once ready to
+        // break live upgrade.
+        let states = new_cpu_ids
+            .clone()
+            .map(|cpu_id| snapshot_from_id(snapshot, cpu_id.to_string().as_str()))
+            .collect::<Vec<_>>();
+        let mut states = par_map(
+            &states,
+            |snapshot| {
+                snapshot
+                    .map(|snapshot| {
+                        snapshot.to_state::<CpuState>().map_err(|e| {
+                            Error::VcpuCreate(anyhow!(
+                                "Could not get vCPU state from snapshot {e:?}"
+                            ))
+                        })
+                    })
+                    .transpose()
+            },
+            |panic| Error::VcpuCreate(anyhow!("vCPU restore thread panicked: {panic}")),
+        )?
+        .into_iter();
+
+        for cpu_id in new_cpu_ids {
+            let state = states
+                .next()
+                .expect("should have one state per newly created vCPU");
+            vcpus.push(self.create_vcpu(cpu_id, state)?);
         }
 
         #[cfg(target_arch = "x86_64")]
@@ -2883,18 +2901,69 @@ impl Pausable for CpuManager {
     }
 }
 
+/// Applies `f` to every vCPU, spread over as many threads as the host has
+/// processors, and returns the results in vCPU order.
+///
+/// Used for the per-vCPU work of snapshot and restore, which happens while the
+/// VM is stopped and therefore counts towards the migration downtime.
+fn par_map<I, T, E, F, P>(items: &[I], f: F, on_panic: P) -> result::Result<Vec<T>, E>
+where
+    I: Sync,
+    T: Send,
+    E: Send,
+    F: Fn(&I) -> result::Result<T, E> + Sync,
+    P: Fn(String) -> E,
+{
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let threads = thread::available_parallelism()
+        .map_or(1, |threads| threads.get())
+        .min(items.len());
+    let per_thread = items.len().div_ceil(threads);
+
+    thread::scope(|scope| {
+        let handles = items
+            .chunks(per_thread)
+            .map(|chunk| {
+                scope.spawn(|| chunk.iter().map(&f).collect::<result::Result<Vec<_>, E>>())
+            })
+            .collect::<Vec<_>>();
+
+        let mut results = Vec::with_capacity(items.len());
+        for handle in handles {
+            let chunk = handle.join().map_err(|e| on_panic(format!("{e:?}")))??;
+            results.extend(chunk);
+        }
+        Ok(results)
+    })
+}
+
 impl Snapshottable for CpuManager {
     fn id(&self) -> String {
         CPU_MANAGER_SNAPSHOT_ID.to_string()
     }
 
     fn snapshot(&mut self) -> result::Result<Snapshot, MigratableError> {
-        let mut cpu_manager_snapshot = Snapshot::default();
-
         // The CpuManager snapshot is a collection of all vCPUs snapshots.
-        for vcpu in &self.vcpus {
-            let mut vcpu = vcpu.lock().unwrap();
-            cpu_manager_snapshot.add_snapshot(vcpu.id(), vcpu.snapshot()?);
+        //
+        // Capturing one vCPU means a series of ioctls plus serializing the
+        // result, which is independent of every other vCPU. The VM is stopped
+        // while this runs, so the work is spread over threads: serially, it
+        // takes about 14ms for 200 vCPUs.
+        let snapshots = par_map(
+            &self.vcpus,
+            |vcpu| {
+                let mut vcpu = vcpu.lock().unwrap();
+                Ok((vcpu.id(), vcpu.snapshot()?))
+            },
+            |panic| MigratableError::Snapshot(anyhow!("vCPU snapshot thread panicked: {panic}")),
+        )?;
+
+        let mut cpu_manager_snapshot = Snapshot::default();
+        for (id, snapshot) in snapshots {
+            cpu_manager_snapshot.add_snapshot(id, snapshot);
         }
 
         Ok(cpu_manager_snapshot)
