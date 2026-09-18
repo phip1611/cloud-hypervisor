@@ -1540,7 +1540,8 @@ impl Vmm {
     ///    bytes.
     /// 2. **Downtime budget is met** – the estimated downtime for the final
     ///    (paused) iteration is within the caller-specified
-    ///    [`VmSendMigrationData::downtime`] budget.
+    ///    [`VmSendMigrationData::downtime`] budget, minus `fixed_downtime`,
+    ///    the part of the downtime that does not depend on the memory delta.
     /// 3. **Timeout** – the precopy phase has been running for at least
     ///    [`VmSendMigrationData::timeout`]. The outcome depends on
     ///    [`VmSendMigrationData::timeout_strategy`]:
@@ -1561,31 +1562,31 @@ impl Vmm {
     fn is_precopy_converged(
         ctx: &MemoryMigrationContext,
         send_data_migration: &VmSendMigrationData,
+        fixed_downtime: Duration,
     ) -> result::Result<bool, MigratableError> {
         if ctx.current_iteration_total_bytes == 0 {
             debug!("Precopy: No more memory to transfer");
             return Ok(true);
         }
 
-        // We currently ignore the time required to transfer the final
-        // VM state (device state and vCPUs) and the time needed on the
-        // receiver to create the VM and initialize its data structures
-        // before execution can resume.
-        //
-        // Manual testing showed that migrating an idle VM on a modern
-        // AMD CPU (CHV release build) adds ~5 ms of overhead when
-        // scaling from 1 to 200 vCPUs. Given this small cost, we
-        // deliberately avoid additional heuristics to estimate the
-        // downtime more precisely - for now. Instead, we approximate
-        // the downtime just by the transfer time of the final memory
-        // delta.
+        // Transferring the final memory delta is only one part of the
+        // downtime: the VM also has to be paused, its state captured, sent,
+        // restored and resumed. That part does not depend on the memory
+        // delta, so it is subtracted from the budget rather than estimated
+        // from the transfer.
+        let budget = send_data_migration
+            .downtime()
+            .saturating_sub(fixed_downtime);
         if let Some(memory_downtime) = ctx.estimated_downtime
-            && memory_downtime <= send_data_migration.downtime()
+            && memory_downtime <= budget
         {
             debug!(
-                "Precopy: Target downtime can be met: {}ms <= {}ms",
-                memory_downtime.as_millis(),
-                send_data_migration.downtime().as_millis()
+                "Precopy: Target downtime can be met: {:.2}ms <= {:.2}ms ({:.2}ms of the \
+                 {}ms budget is needed for the VM state)",
+                memory_downtime.as_secs_f64() * 1000.0,
+                budget.as_secs_f64() * 1000.0,
+                fixed_downtime.as_secs_f64() * 1000.0,
+                send_data_migration.downtime().as_millis(),
             );
             return Ok(true);
         }
@@ -1618,6 +1619,29 @@ impl Vmm {
         Ok(false)
     }
 
+    /// Estimates the part of the downtime that is not the final memory
+    /// transfer: pausing the VM, capturing its state, sending it, and
+    /// restoring and resuming it on the destination.
+    ///
+    /// This cost grows with the number of vCPUs and devices and does not
+    /// depend on the guest memory size. The factors are derived from
+    /// migrating idle guests over TCP, where the final memory iteration is
+    /// empty, and are deliberately kept simple: a rough estimate is much
+    /// closer to the truth than ignoring the cost altogether.
+    fn estimate_fixed_downtime(vm: &Vm) -> Duration {
+        /// What a migration costs even for a single vCPU without devices.
+        const BASE: Duration = Duration::from_micros(1500);
+        /// Per vCPU: mostly capturing, serializing and restoring its state.
+        const PER_VCPU: Duration = Duration::from_micros(400);
+        /// Per device: mostly re-creating it on the destination.
+        const PER_DEVICE: Duration = Duration::from_micros(300);
+
+        let vcpus = vm.get_config().lock().unwrap().cpus.boot_vcpus;
+        let devices = vm.device_tree().lock().unwrap().iter().count();
+
+        BASE + PER_VCPU * vcpus + PER_DEVICE * devices as u32
+    }
+
     /// Performs precopy memory migration including multiple iterations.
     ///
     /// This includes:
@@ -1639,12 +1663,25 @@ impl Vmm {
         let mut mem_ctx = MemoryMigrationContext::new();
 
         vm.start_dirty_log()?;
+
+        let fixed_downtime = Self::estimate_fixed_downtime(vm);
+        if fixed_downtime >= send_data_migration.downtime() {
+            warn!(
+                "Target downtime of {}ms is below the estimated {:.2}ms needed to hand over \
+                 the VM state: precopy continues until no memory is left to transfer or the \
+                 timeout of {}s is reached",
+                send_data_migration.downtime().as_millis(),
+                fixed_downtime.as_secs_f64() * 1000.0,
+                send_data_migration.timeout().as_secs(),
+            );
+        }
+
         let remaining = Self::do_memory_iterations(
             vm,
             socket,
             &mut mem_ctx,
             // We bind send_data_migration to the callback
-            |ctx| Self::is_precopy_converged(ctx, send_data_migration),
+            |ctx| Self::is_precopy_converged(ctx, send_data_migration, fixed_downtime),
             mem_send,
         )?;
         let downtime_begin = Instant::now();
