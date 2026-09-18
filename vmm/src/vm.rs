@@ -553,7 +553,11 @@ pub struct Vm {
     saved_clock: Option<SavedClock>,
     #[cfg(not(target_arch = "riscv64"))]
     numa_nodes: NumaNodes,
-    #[cfg_attr(any(not(feature = "kvm"), target_arch = "aarch64"), allow(dead_code))]
+    // Only the SEV-SNP path reads this.
+    #[cfg_attr(
+        not(all(feature = "sev_snp", target_arch = "x86_64")),
+        allow(dead_code)
+    )]
     #[cfg(not(target_arch = "riscv64"))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     stop_on_boot: bool,
@@ -3357,35 +3361,11 @@ impl Snapshottable for Vm {
             )));
         }
 
+        // Reuse what the CPU manager generated at VM creation from the same
+        // configuration: regenerating it here would query the hypervisor and
+        // patch the leaves again while the VM is stopped.
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-        let common_cpuid = {
-            let (amx, max_phys_bits, kvm_hyperv, profile) = {
-                let guard = self.config.lock().unwrap();
-                let VmConfig { cpus, .. } = &*guard;
-                (
-                    cpus.features.amx,
-                    cpus.max_phys_bits,
-                    cpus.kvm_hyperv,
-                    cpus.profile,
-                )
-            };
-
-            let phys_bits = physical_bits(self.hypervisor.as_ref(), max_phys_bits);
-
-            arch::generate_common_cpuid(
-                self.hypervisor.as_ref(),
-                &arch::CpuidConfig {
-                    phys_bits,
-                    kvm_hyperv,
-                    #[cfg(feature = "tdx")]
-                    tdx: false,
-                    amx,
-                    profile,
-                },
-            )
-            .context("Error generating common cpuid")
-            .map_err(MigratableError::MigrateReceive)?
-        };
+        let common_cpuid = self.cpu_manager.lock().unwrap().common_cpuid();
 
         let vm_snapshot_state = VmSnapshot {
             clock: self.saved_clock.map(|saved| saved.state),
