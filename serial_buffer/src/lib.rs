@@ -78,6 +78,11 @@ impl Write for SerialBuffer {
         let mut offset = 0;
         loop {
             match self.out.write(&buf[offset..]) {
+                // A zero-length write means the out device does not accept
+                // any more bytes for now. Buffer the rest, like we do when
+                // it reports that it would block, instead of retrying
+                // forever without making progress.
+                Ok(0) if offset < buf.len() => self.fill_buffer(&buf[offset..]),
                 Ok(written_bytes) => {
                     if written_bytes < buf.len() - offset {
                         offset += written_bytes;
