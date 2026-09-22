@@ -2397,7 +2397,10 @@ impl Vmm {
                 // event won't call the shutdown path automatically.
                 vm.shutdown();
 
-                if let Err(e) = self.exit_evt.write(1) {
+                if config.keep_alive {
+                    // API users can still query live-migration statistics
+                    info!("Keeping VMM alive as requested");
+                } else if let Err(e) = self.exit_evt.write(1) {
                     error!("Failed exiting the VMM after migration: {e}");
                 }
             }
