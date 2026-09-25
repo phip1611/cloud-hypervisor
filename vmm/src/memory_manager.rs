@@ -2566,6 +2566,29 @@ impl MemoryManager {
         self.guest_memory.clone()
     }
 
+    /// Populates the guest RAM that is backed by private anonymous memory.
+    ///
+    /// Regions backed by a file or a memfd are skipped: their content may
+    /// legitimately stay sparse, for example because the sender skips holes
+    /// of a shared file-backed region.
+    ///
+    /// Failures are reported to the caller but are not fatal for a migration:
+    /// the pages are faulted in by the transfer itself as well.
+    pub fn prefault_anonymous_regions(&self) -> Result<(), Error> {
+        // SAFETY: FFI call. Trivially safe.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+
+        for region in self.guest_memory.memory().iter() {
+            if region.file_offset().is_some() {
+                continue;
+            }
+
+            prefault_memory(region.as_ptr(), region.len() as usize, page_size)?;
+        }
+
+        Ok(())
+    }
+
     pub fn boot_guest_memory(&self) -> GuestMemoryMmap {
         self.boot_guest_memory.clone()
     }

@@ -1360,6 +1360,17 @@ impl Vmm {
         .context("Error creating MemoryManager from snapshot")
         .map_err(MigratableError::MigrateReceive)?;
 
+        // A precopy migration writes every page of guest RAM, so populating it
+        // now is strictly cheaper than taking a page fault per page while
+        // copying the incoming data in. Postcopy must not do this: its pages
+        // are served on demand through userfaultfd. MemFD migrations receive
+        // the memory as file descriptors and don't copy it at all.
+        if matches!(mode, MigrationMode::Precopy)
+            && let Err(e) = memory_manager.lock().unwrap().prefault_anonymous_regions()
+        {
+            warn!("Could not prefault guest memory for the incoming migration: {e}");
+        }
+
         Ok((memory_manager, mode))
     }
 
