@@ -6,6 +6,7 @@
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::io::{self, ErrorKind, Read, Write};
+use std::marker::PhantomData;
 use std::net::{TcpListener, TcpStream};
 use std::num::{NonZeroU32, ParseIntError};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
@@ -25,14 +26,16 @@ use serde_json;
 use socket2::{SockRef, TcpKeepalive};
 use thiserror::Error;
 use vm_memory::bitmap::BitmapSlice;
+use vm_memory::volatile_memory::{PtrGuard, PtrGuardMut};
 use vm_memory::{
-    Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, ReadVolatile, VolatileMemoryError,
-    VolatileSlice, WriteVolatile,
+    GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, Permissions, ReadVolatile,
+    VolatileMemoryError, VolatileSlice, WriteVolatile,
 };
 use vm_migration::protocol::{Command, ConnectionRole, MemoryRangeTable, Request, Response};
 use vm_migration::tls::{TlsServerConfig, TlsStream};
 use vm_migration::{MigratableError, Snapshot};
 use vmm_sys_util::eventfd::EventFd;
+use zerocopy::IntoBytes;
 
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
 use crate::sync_utils::Gate;
@@ -1214,6 +1217,189 @@ pub(crate) fn send_state(
     )
 }
 
+/// Maximum number of buffers a single vectored I/O call accepts (`IOV_MAX`).
+const MAX_IOV: usize = 1024;
+
+/// Which way [`IoVecs::transfer`] moves the collected buffers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Send,
+    Receive,
+}
+
+impl SocketStream {
+    /// Moves every buffer in `iovs` with `writev(2)` or `readv(2)`, retrying
+    /// until all of them are done.
+    ///
+    /// `iovs` is left in an unspecified state.
+    ///
+    /// # Safety
+    ///
+    /// Each buffer must point to at least `iov_len` bytes that stay valid for
+    /// the duration of the call: readable to send, writable to receive.
+    unsafe fn transfer_iovecs(
+        &mut self,
+        iovs: &mut [libc::iovec],
+        direction: Direction,
+    ) -> Result<(), MigratableError> {
+        // rustls encrypts and decrypts through buffers of its own, so TLS
+        // cannot use vectored I/O.
+        if let SocketStream::Tls(_) = self {
+            // SAFETY: guaranteed by this function's contract.
+            return unsafe { self.transfer_tls(iovs, direction) };
+        }
+
+        let fd = self.as_fd().as_raw_fd();
+        let mut iovs = iovs;
+        while !iovs.is_empty() {
+            let count = iovs.len().min(MAX_IOV) as libc::c_int;
+            // SAFETY: `iovs` is valid per this function's contract, and
+            // `count` exceeds neither the slice length nor IOV_MAX.
+            let done = unsafe {
+                match direction {
+                    Direction::Send => libc::writev(fd, iovs.as_ptr(), count),
+                    Direction::Receive => libc::readv(fd, iovs.as_ptr(), count),
+                }
+            };
+
+            let done = match done {
+                -1 => {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(MigratableError::MigrateSocket(error));
+                }
+                // Don't spin forever on a closed connection.
+                0 => {
+                    return Err(MigratableError::MigrateReceive(anyhow!(
+                        "Connection closed while transferring memory: EOF"
+                    )));
+                }
+                done => done as usize,
+            };
+
+            iovs = advance_iovecs(iovs, done);
+        }
+
+        Ok(())
+    }
+
+    /// Moves the buffers one by one, for TLS.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::transfer_iovecs`].
+    unsafe fn transfer_tls(
+        &mut self,
+        iovs: &[libc::iovec],
+        direction: Direction,
+    ) -> Result<(), MigratableError> {
+        let SocketStream::Tls(stream) = self else {
+            unreachable!("only TLS has no vectored I/O");
+        };
+
+        for iov in iovs {
+            // SAFETY: valid for `iov_len` bytes per this function's contract.
+            // The bitmap is handled by the caller, hence none here.
+            let mut slice = unsafe { VolatileSlice::new(iov.iov_base.cast(), iov.iov_len) };
+            match direction {
+                Direction::Send => stream.write_all_volatile(&slice),
+                Direction::Receive => stream.read_exact_volatile(&mut slice),
+            }
+            .map_err(|e| MigratableError::MigrateSocket(io::Error::other(e)))?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Drops the `count` bytes at the front of `iovs` that have been transferred
+/// and returns what is left.
+fn advance_iovecs(iovs: &mut [libc::iovec], mut count: usize) -> &mut [libc::iovec] {
+    let mut done = 0;
+    for iov in iovs.iter_mut() {
+        if count < iov.iov_len {
+            // SAFETY: the transferred bytes are part of this buffer, so the
+            // resulting pointer stays within it.
+            iov.iov_base = unsafe { iov.iov_base.byte_add(count) };
+            iov.iov_len -= count;
+            break;
+        }
+        count -= iov.iov_len;
+        done += 1;
+    }
+
+    &mut iovs[done..]
+}
+
+/// Buffers for one vectored transfer: host memory borrowed for `'a`, and
+/// guest memory kept mapped by the collected guards.
+#[derive(Default)]
+struct IoVecs<'a> {
+    iovs: Vec<libc::iovec>,
+    guards: Vec<PtrGuard>,
+    guards_mut: Vec<PtrGuardMut>,
+    _borrowed: PhantomData<&'a [u8]>,
+}
+
+impl<'a> IoVecs<'a> {
+    fn push_bytes(&mut self, bytes: &'a [u8]) {
+        self.iovs.push(libc::iovec {
+            iov_base: bytes.as_ptr().cast_mut().cast(),
+            iov_len: bytes.len(),
+        });
+    }
+
+    /// Adds guest memory to send.
+    fn push_guest_memory<B: BitmapSlice>(&mut self, slice: &VolatileSlice<'a, B>) {
+        let guard = slice.ptr_guard();
+        self.iovs.push(libc::iovec {
+            iov_base: guard.as_ptr().cast_mut().cast(),
+            iov_len: guard.len(),
+        });
+        self.guards.push(guard);
+    }
+
+    /// Adds guest memory to receive into, and marks it dirty up front, which
+    /// is what vm-memory does for a failed read as well.
+    fn push_guest_memory_mut<B: BitmapSlice>(&mut self, slice: &VolatileSlice<'a, B>) {
+        slice.bitmap().mark_dirty(0, slice.len());
+
+        let guard = slice.ptr_guard_mut();
+        self.iovs.push(libc::iovec {
+            iov_base: guard.as_ptr().cast(),
+            iov_len: guard.len(),
+        });
+        self.guards_mut.push(guard);
+    }
+
+    fn is_full(&self) -> bool {
+        self.iovs.len() >= MAX_IOV
+    }
+
+    /// Transfers everything collected and empties the batch.
+    fn transfer(
+        &mut self,
+        socket: &mut SocketStream,
+        direction: Direction,
+    ) -> Result<(), MigratableError> {
+        if self.iovs.is_empty() {
+            return Ok(());
+        }
+
+        // SAFETY: every buffer points either into host memory borrowed for
+        // `'a` or into guest memory that the guards keep mapped. Both outlive
+        // this call, and the ranges of one request do not overlap each other.
+        let result = unsafe { socket.transfer_iovecs(&mut self.iovs, direction) };
+
+        self.iovs.clear();
+        self.guards.clear();
+        self.guards_mut.clear();
+        result
+    }
+}
+
 /// Transmits the given [`MemoryRangeTable`] and the corresponding guest memory
 /// content over the wire if there is at least one range.
 ///
@@ -1229,35 +1415,18 @@ pub(crate) fn send_memory_ranges(
         return Ok(());
     }
 
-    // Send the memory table
-    Request::memory(ranges.length()).write_to(socket)?;
-    ranges.write_to(socket)?;
-
-    // And then the memory itself
+    // The request header, the range table and the guest memory of every range
+    // go out through as few syscalls as possible. A fragmented iteration can
+    // hold hundreds of thousands of single-page ranges, and one write(2) per
+    // range costs more than collecting them.
+    let request = Request::memory(ranges.length());
     let mem = guest_memory.memory();
-    for range in ranges.ranges() {
-        let mut offset: u64 = 0;
-        // Here we are manually handling the retry in case we can't read the
-        // whole region at once because we can't use the implementation
-        // from vm-memory::GuestMemory of write_all_to() as it is not
-        // following the correct behavior. For more info about this issue
-        // see: https://github.com/rust-vmm/vm-memory/issues/174
-        loop {
-            let bytes_written = mem
-                .write_volatile_to(
-                    GuestAddress(range.gpa + offset),
-                    socket,
-                    (range.length - offset) as usize,
-                )
-                .context("Error transferring memory to socket")
-                .map_err(MigratableError::MigrateSend)?;
-            offset += bytes_written as u64;
 
-            if offset == range.length {
-                break;
-            }
-        }
-    }
+    let mut batch = IoVecs::default();
+    batch.push_bytes(request.as_bytes());
+    batch.push_bytes(ranges.as_bytes());
+    transfer_ranges(&mut batch, socket, &mem, ranges, Direction::Send)?;
+
     expect_ok_response(
         socket,
         MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
@@ -1274,47 +1443,187 @@ pub(crate) fn receive_memory_ranges(
     // Read the memory table
     let ranges = MemoryRangeTable::read_from(socket, req.length())?;
 
-    // And then the memory itself
+    // And then the memory itself. As on the sending side, the ranges are
+    // transferred in batches so that a fragmented iteration does not cost one
+    // read(2) and one wakeup per range.
     let mem = guest_memory.memory();
 
-    for range in ranges.ranges() {
-        let mut offset: u64 = 0;
-        // Here we are manually handling the retry in case we can't read the
-        // whole region at once because we can't use the implementation
-        // from vm-memory::GuestMemory of read_exact_from() as it is not
-        // following the correct behavior. For more info about this issue
-        // see: https://github.com/rust-vmm/vm-memory/issues/174
-        loop {
-            let bytes_read = mem
-                .read_volatile_from(
-                    GuestAddress(range.gpa + offset),
-                    socket,
-                    (range.length - offset) as usize,
-                )
-                .context("Error receiving memory from socket")
-                .map_err(MigratableError::MigrateReceive)?;
+    transfer_ranges(
+        &mut IoVecs::default(),
+        socket,
+        &mem,
+        &ranges,
+        Direction::Receive,
+    )
+}
 
-            // EOF: Don't spin forever on closed connection
-            if bytes_read == 0 {
-                return Err(MigratableError::MigrateReceive(anyhow!(
-                    "Connection closed while receiving memory: EOF"
-                )));
+/// Adds the guest memory of every range to `batch` and transfers it, in
+/// batches of at most `IOV_MAX` buffers.
+fn transfer_ranges<'a>(
+    batch: &mut IoVecs<'a>,
+    socket: &mut SocketStream,
+    mem: &'a GuestMemoryMmap,
+    ranges: &MemoryRangeTable,
+    direction: Direction,
+) -> Result<(), MigratableError> {
+    let (permissions, error): (_, fn(anyhow::Error) -> MigratableError) = match direction {
+        Direction::Send => (Permissions::Read, MigratableError::MigrateSend),
+        Direction::Receive => (Permissions::Write, MigratableError::MigrateReceive),
+    };
+
+    for range in ranges.ranges() {
+        let slices = mem
+            .get_slices(GuestAddress(range.gpa), range.length as usize, permissions)
+            .context("Error accessing guest memory to transfer")
+            .map_err(error)?;
+
+        for slice in slices {
+            let slice = slice
+                .context("Error accessing guest memory to transfer")
+                .map_err(error)?;
+
+            match direction {
+                Direction::Send => batch.push_guest_memory(&slice),
+                Direction::Receive => batch.push_guest_memory_mut(&slice),
             }
 
-            offset += bytes_read as u64;
-
-            if offset == range.length {
-                break;
+            if batch.is_full() {
+                batch.transfer(socket, direction)?;
             }
         }
     }
 
-    Ok(())
+    batch.transfer(socket, direction)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::tcp_address_to_server_name;
+    use std::os::unix::net::UnixStream;
+
+    use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
+    use vm_migration::protocol::{MemoryRange, MemoryRangeTable, Request, Response};
+
+    use super::{
+        MAX_IOV, SocketStream, advance_iovecs, receive_memory_ranges, send_memory_ranges,
+        tcp_address_to_server_name,
+    };
+    use crate::GuestMemoryMmap;
+
+    fn iovecs(bufs: &[&[u8]]) -> Vec<libc::iovec> {
+        bufs.iter()
+            .map(|b| libc::iovec {
+                iov_base: b.as_ptr().cast_mut().cast(),
+                iov_len: b.len(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_advance_iovecs_partial_transfer() {
+        let (a, b, c) = ([0u8; 4], [0u8; 8], [0u8; 2]);
+        let mut iovs = iovecs(&[&a, &b, &c]);
+
+        // Nothing transferred: everything is left.
+        let rest = advance_iovecs(&mut iovs, 0);
+        assert_eq!(rest.len(), 3);
+
+        // Partially through the first buffer.
+        let rest = advance_iovecs(rest, 3);
+        assert_eq!(rest.len(), 3);
+        assert_eq!(rest[0].iov_len, 1);
+        assert_eq!(rest[0].iov_base, a[3..].as_ptr().cast_mut().cast());
+
+        // Exactly to a buffer boundary.
+        let rest = advance_iovecs(rest, 1);
+        assert_eq!(rest.len(), 2);
+        assert_eq!(rest[0].iov_len, 8);
+
+        // Across a buffer boundary.
+        let rest = advance_iovecs(rest, 9);
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].iov_len, 1);
+
+        // Everything transferred.
+        assert!(advance_iovecs(rest, 1).is_empty());
+    }
+
+    fn guest_memory(size: usize, fill: impl Fn(usize) -> u8) -> GuestMemoryAtomic<GuestMemoryMmap> {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), size)])
+            .expect("should map guest memory for the test");
+        let content: Vec<u8> = (0..size).map(&fill).collect();
+        mem.write_slice(&content, GuestAddress(0))
+            .expect("should fill guest memory");
+        GuestMemoryAtomic::new(mem)
+    }
+
+    /// Sends a range table and receives it again, over a socket pair.
+    fn transfer(ranges: Vec<MemoryRange>) {
+        let size = ranges
+            .iter()
+            .map(|range| (range.gpa + range.length) as usize)
+            .max()
+            .expect("should have a range");
+        let source = guest_memory(size, |i| (i / 7 + i) as u8);
+        let destination = guest_memory(size, |_| 0);
+
+        let mut table = MemoryRangeTable::default();
+        for range in &ranges {
+            table.push(*range);
+        }
+
+        let (sender, receiver) = UnixStream::pair().expect("should create a socket pair");
+        let received = destination.clone();
+        let thread = std::thread::spawn(move || {
+            let mut socket = SocketStream::Unix(receiver);
+            let request = Request::read_from(&mut socket).expect("should read the request");
+            receive_memory_ranges(&received, &request, &mut socket).expect("should receive memory");
+            Response::ok()
+                .write_to(&mut socket)
+                .expect("should acknowledge");
+        });
+
+        let mut socket = SocketStream::Unix(sender);
+        send_memory_ranges(&source, &table, &mut socket).expect("should send memory");
+        thread.join().expect("receiver should not panic");
+
+        let (source, destination) = (source.memory(), destination.memory());
+        for range in ranges {
+            let mut expected = vec![0u8; range.length as usize];
+            let mut actual = vec![0u8; range.length as usize];
+            source
+                .read_slice(&mut expected, GuestAddress(range.gpa))
+                .expect("should read the source");
+            destination
+                .read_slice(&mut actual, GuestAddress(range.gpa))
+                .expect("should read the destination");
+            assert_eq!(actual, expected, "range at {:#x}", range.gpa);
+        }
+    }
+
+    #[test]
+    fn test_transfer_of_more_ranges_than_one_batch_holds() {
+        let ranges = (0..MAX_IOV as u64 * 2 + 1)
+            .map(|i| MemoryRange {
+                gpa: i * 2 * 4096,
+                length: 4096,
+            })
+            .collect();
+        transfer(ranges);
+    }
+
+    #[test]
+    fn test_transfer_of_a_large_range() {
+        transfer(vec![
+            MemoryRange {
+                gpa: 0,
+                length: 4096,
+            },
+            MemoryRange {
+                gpa: 8192,
+                length: 8 << 20,
+            },
+        ]);
+    }
 
     #[test]
     fn test_tcp_address_to_server_name() {

@@ -518,8 +518,13 @@ impl MemoryRangeTable {
         (size_of::<MemoryRange>() * self.data.len()) as u64
     }
 
+    /// Returns the table in its wire representation.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.data.as_bytes()
+    }
+
     pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
-        fd.write_all(self.data.as_bytes())
+        fd.write_all(self.as_bytes())
             .map_err(MigratableError::MigrateSocket)
     }
 
