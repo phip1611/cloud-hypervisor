@@ -2898,6 +2898,7 @@ dependencies = [
  "vmm-sys-util",
  "zbus",
  "zerocopy",
+ "zstd",
 ]
 
 [[package]]

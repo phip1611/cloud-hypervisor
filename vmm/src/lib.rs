@@ -1398,9 +1398,7 @@ impl Vmm {
             socket
                 .read_exact(&mut data)
                 .map_err(MigratableError::MigrateSocket)?;
-            serde_json::from_slice(&data)
-                .context("Error deserialising snapshot")
-                .map_err(MigratableError::MigrateReceive)
+            transport::deserialize_state(&data)
         })?;
 
         let exit_evt = self
