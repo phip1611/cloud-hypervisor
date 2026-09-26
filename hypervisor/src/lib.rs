@@ -177,6 +177,28 @@ impl CpuState {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+impl CpuState {
+    /// Returns `None` if the backend does not save CPUID.
+    pub fn cpuid_mut(&mut self) -> Option<&mut Vec<arch::x86::CpuIdEntry>> {
+        match self {
+            #[cfg(feature = "kvm")]
+            CpuState::Kvm(state) => Some(&mut state.cpuid),
+            #[cfg(feature = "mshv")]
+            CpuState::Mshv(_) => None,
+        }
+    }
+
+    pub fn msrs_mut(&mut self) -> &mut Vec<arch::x86::MsrEntry> {
+        match self {
+            #[cfg(feature = "kvm")]
+            CpuState::Kvm(state) => &mut state.msrs,
+            #[cfg(feature = "mshv")]
+            CpuState::Mshv(state) => &mut state.msrs,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[cfg(target_arch = "x86_64")]
 pub enum ClockData {
