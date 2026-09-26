@@ -79,7 +79,7 @@ use vm_memory::{Bytes, GuestAddressSpace};
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable, Transportable,
-    snapshot_from_id,
+    state_from_id,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{SIGRTMIN, register_signal_handler};
@@ -976,11 +976,7 @@ impl CpuManager {
         })))
     }
 
-    fn create_vcpu(
-        &mut self,
-        cpu_id: u32,
-        snapshot: Option<&Snapshot>,
-    ) -> Result<Arc<Mutex<Vcpu>>> {
+    fn create_vcpu(&mut self, cpu_id: u32, state: Option<CpuState>) -> Result<Arc<Mutex<Vcpu>>> {
         debug!("Creating vCPU: cpu_id = {cpu_id}");
 
         #[cfg(target_arch = "x86_64")]
@@ -1001,11 +997,7 @@ impl CpuManager {
             self.msr_config_update.clone(),
         )?;
 
-        if let Some(snapshot) = snapshot {
-            let state: CpuState = snapshot.to_state().map_err(|e| {
-                Error::VcpuCreate(anyhow!("Could not get vCPU state from snapshot {e:?}"))
-            })?;
-
+        if let Some(state) = state {
             #[cfg(target_arch = "aarch64")]
             {
                 vcpu.init(self.vm.as_ref())?;
@@ -1123,7 +1115,10 @@ impl CpuManager {
 
         // Only create vCPUs in excess of all the allocated vCPUs.
         for cpu_id in self.vcpus.len() as u32..desired_vcpus {
-            vcpus.push(self.create_vcpu(cpu_id, snapshot_from_id(snapshot, &cpu_id.to_string()))?);
+            let state = state_from_id(snapshot, &cpu_id.to_string()).map_err(|e| {
+                Error::VcpuCreate(anyhow!("Could not get vCPU state from snapshot {e:?}"))
+            })?;
+            vcpus.push(self.create_vcpu(cpu_id, state)?);
         }
 
         #[cfg(target_arch = "x86_64")]
