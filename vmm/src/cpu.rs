@@ -78,8 +78,7 @@ use vm_memory::ByteValued;
 use vm_memory::{Bytes, GuestAddressSpace};
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
 use vm_migration::{
-    Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable, Transportable,
-    state_from_id,
+    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, state_from_id,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{SIGRTMIN, register_signal_handler};
@@ -678,24 +677,6 @@ impl Vcpu {
             .set_gic_redistributor_addr(gicr_base)
             .map_err(Error::VcpuSetGicrBaseAddr)?;
         Ok(())
-    }
-}
-
-impl Pausable for Vcpu {}
-impl Snapshottable for Vcpu {
-    fn id(&self) -> String {
-        self.id.to_string()
-    }
-
-    fn snapshot(&mut self) -> result::Result<Snapshot, MigratableError> {
-        let saved_state = self
-            .vcpu
-            .state()
-            .map_err(|e| MigratableError::Snapshot(anyhow!("Could not get vCPU state {e:?}")))?;
-
-        Ok(Snapshot::from_data(SnapshotData::new_from_state(
-            &saved_state,
-        )?))
     }
 }
 
@@ -2803,12 +2784,18 @@ impl Snapshottable for CpuManager {
     }
 
     fn snapshot(&mut self) -> result::Result<Snapshot, MigratableError> {
+        let states = self
+            .vcpus
+            .iter()
+            .map(|vcpu| vcpu.lock().unwrap().vcpu.state())
+            .collect::<result::Result<Vec<_>, _>>()
+            .map_err(|e| MigratableError::Snapshot(anyhow!("Could not get vCPU state {e:?}")))?;
+
         let mut cpu_manager_snapshot = Snapshot::default();
 
         // The CpuManager snapshot is a collection of all vCPUs snapshots.
-        for vcpu in &self.vcpus {
-            let mut vcpu = vcpu.lock().unwrap();
-            cpu_manager_snapshot.add_snapshot(vcpu.id(), vcpu.snapshot()?);
+        for (cpu_id, state) in states.iter().enumerate() {
+            cpu_manager_snapshot.add_snapshot(cpu_id.to_string(), Snapshot::new_from_state(state)?);
         }
 
         Ok(cpu_manager_snapshot)
