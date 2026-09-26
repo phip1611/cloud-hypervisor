@@ -49,7 +49,7 @@ use hypervisor::arch::aarch64::mpidr_from_vcpu_id;
 use hypervisor::arch::aarch64::regs::{AARCH64_PMU_IRQ, MPIDR_EL1};
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 use hypervisor::arch::aarch64::regs::{ID_AA64MMFR0_EL1, TCR_EL1, TTBR1_EL1};
-#[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
+#[cfg(target_arch = "x86_64")]
 use hypervisor::arch::x86::MsrEntry;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use hypervisor::arch::x86::SpecialRegisters;
@@ -680,6 +680,60 @@ impl Vcpu {
     }
 }
 
+/// vCPU state entries of the first vCPU, stored once in the CpuManager
+/// snapshot. Each vCPU snapshot only keeps its entries that differ.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CommonVcpuState {
+    #[cfg(target_arch = "x86_64")]
+    cpuid: Vec<CpuIdEntry>,
+    #[cfg(target_arch = "x86_64")]
+    msrs: Vec<MsrEntry>,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl CommonVcpuState {
+    fn extract(states: &mut [CpuState]) -> Self {
+        let cpuid = Self::extract_list(states.iter_mut().filter_map(CpuState::cpuid_mut).collect());
+        let msrs = Self::extract_list(states.iter_mut().map(CpuState::msrs_mut).collect());
+        Self { cpuid, msrs }
+    }
+
+    fn insert_into(&self, state: &mut CpuState) {
+        if let Some(cpuid) = state.cpuid_mut() {
+            Self::insert_list(cpuid, &self.cpuid, |e| (e.function, e.index));
+        }
+        Self::insert_list(state.msrs_mut(), &self.msrs, |e| e.index);
+    }
+
+    /// Compares by position, as all vCPUs save the same CPUID leaves and MSRs
+    /// in the same order.
+    fn extract_list<T: Clone + PartialEq>(lists: Vec<&mut Vec<T>>) -> Vec<T> {
+        let common = lists.first().map(|list| list.to_vec()).unwrap_or_default();
+        for list in lists {
+            let mut common = common.iter();
+            list.retain(|entry| Some(entry) != common.next());
+        }
+        common
+    }
+
+    /// Keeps the original order, e.g. IA32_TSC must precede IA32_TSC_DEADLINE.
+    fn insert_list<T: Clone, K: PartialEq>(list: &mut Vec<T>, common: &[T], key: impl Fn(&T) -> K) {
+        *list = common
+            .iter()
+            .map(|c| list.iter().find(|e| key(e) == key(c)).unwrap_or(c).clone())
+            .collect();
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+impl CommonVcpuState {
+    fn extract(_states: &mut [CpuState]) -> Self {
+        Self {}
+    }
+
+    fn insert_into(&self, _state: &mut CpuState) {}
+}
+
 pub struct CpuManager {
     config: CpusConfig,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
@@ -1094,11 +1148,26 @@ impl CpuManager {
             return Err(Error::DesiredVCpuCountExceedsMax);
         }
 
+        // Snapshots of older versions have no common vCPU state.
+        let common: Option<CommonVcpuState> = snapshot
+            .and_then(|s| s.snapshot_data.as_ref())
+            .map(|data| data.to_state())
+            .transpose()
+            .map_err(|e| {
+                Error::VcpuCreate(anyhow!(
+                    "Could not get common vCPU state from snapshot {e:?}"
+                ))
+            })?;
+
         // Only create vCPUs in excess of all the allocated vCPUs.
         for cpu_id in self.vcpus.len() as u32..desired_vcpus {
-            let state = state_from_id(snapshot, &cpu_id.to_string()).map_err(|e| {
-                Error::VcpuCreate(anyhow!("Could not get vCPU state from snapshot {e:?}"))
-            })?;
+            let mut state: Option<CpuState> = state_from_id(snapshot, &cpu_id.to_string())
+                .map_err(|e| {
+                    Error::VcpuCreate(anyhow!("Could not get vCPU state from snapshot {e:?}"))
+                })?;
+            if let (Some(common), Some(state)) = (&common, &mut state) {
+                common.insert_into(state);
+            }
             vcpus.push(self.create_vcpu(cpu_id, state)?);
         }
 
@@ -2784,14 +2853,15 @@ impl Snapshottable for CpuManager {
     }
 
     fn snapshot(&mut self) -> result::Result<Snapshot, MigratableError> {
-        let states = self
+        let mut states = self
             .vcpus
             .iter()
             .map(|vcpu| vcpu.lock().unwrap().vcpu.state())
             .collect::<result::Result<Vec<_>, _>>()
             .map_err(|e| MigratableError::Snapshot(anyhow!("Could not get vCPU state {e:?}")))?;
 
-        let mut cpu_manager_snapshot = Snapshot::default();
+        let mut cpu_manager_snapshot =
+            Snapshot::new_from_state(&CommonVcpuState::extract(&mut states))?;
 
         // The CpuManager snapshot is a collection of all vCPUs snapshots.
         for (cpu_id, state) in states.iter().enumerate() {
@@ -3428,9 +3498,28 @@ mod tests {
     use arch::layout::{BOOT_STACK_POINTER, ZERO_PAGE_START};
     use arch::x86_64::interrupts::*;
     use arch::x86_64::regs::*;
-    use hypervisor::arch::x86::{FpuState, LapicState};
+    use hypervisor::arch::x86::{FpuState, LapicState, MsrEntry};
     use hypervisor::{HypervisorVmConfig, StandardRegisters};
     use linux_loader::loader::bootparam::setup_header;
+
+    use super::CommonVcpuState;
+
+    #[test]
+    fn test_extract_insert_list() {
+        let msr = |index, data| MsrEntry { index, data };
+        let vcpu0 = vec![msr(0x10, 100), msr(0x174, 1), msr(0x6e0, 5)];
+        let vcpu1 = vec![msr(0x10, 101), msr(0x174, 1), msr(0x6e0, 6)];
+
+        let (mut a, mut b) = (vcpu0.clone(), vcpu1.clone());
+        let common = CommonVcpuState::extract_list(vec![&mut a, &mut b]);
+        assert_eq!(common, vcpu0);
+        assert!(a.is_empty());
+        assert_eq!(b, [msr(0x10, 101), msr(0x6e0, 6)]);
+
+        CommonVcpuState::insert_list(&mut a, &common, |e| e.index);
+        CommonVcpuState::insert_list(&mut b, &common, |e| e.index);
+        assert_eq!((a, b), (vcpu0, vcpu1));
+    }
 
     #[test]
     fn test_setlint() {
