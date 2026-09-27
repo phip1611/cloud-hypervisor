@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use virtio_bindings::virtio_config::*;
 use virtio_bindings::virtio_net::*;
-use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
+use virtio_bindings::virtio_ring::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use virtio_queue::{Queue, QueueT};
 use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic};
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
@@ -572,7 +572,9 @@ impl Net {
                     true,
                 )
             } else {
-                let mut avail_features = (1 << VIRTIO_RING_F_EVENT_IDX) | (1 << VIRTIO_F_VERSION_1);
+                let mut avail_features = (1 << VIRTIO_RING_F_EVENT_IDX)
+                    | (1 << VIRTIO_RING_F_INDIRECT_DESC)
+                    | (1 << VIRTIO_F_VERSION_1);
 
                 if mtu.is_some() {
                     avail_features |= 1 << VIRTIO_NET_F_MTU;
