@@ -23,6 +23,8 @@ pub enum Error {
     MissingProtocol,
     #[error("Error parsing HTTP Content-Length field")]
     ContentLengthParsing(#[source] num::ParseIntError),
+    #[error("HTTP response is not valid UTF-8")]
+    InvalidUtf8(#[source] str::Utf8Error),
     #[error("Server responded with error {0:?}: {1:?}")]
     ServerResponse(
         StatusCode,
@@ -94,24 +96,30 @@ fn get_status_code(res: &str) -> Result<StatusCode, Error> {
 }
 
 fn parse_http_response(socket: &mut dyn Read) -> Result<Option<String>, Error> {
-    let mut res = String::new();
+    // Collect raw bytes and decode only complete parts: a read may end in
+    // the middle of a multi-byte UTF-8 character.
+    let mut bytes = Vec::new();
     let mut body_offset = None;
     let mut content_length: Option<usize> = None;
     loop {
-        let mut bytes = vec![0; 256];
-        let count = socket.read(&mut bytes).map_err(Error::Socket)?;
+        let mut buf = [0; 256];
+        let count = socket.read(&mut buf).map_err(Error::Socket)?;
         // If the return value is 0, the peer has performed an orderly shutdown.
         if count == 0 {
             break;
         }
-        res.push_str(str::from_utf8(&bytes[0..count]).unwrap());
+        bytes.extend_from_slice(&buf[0..count]);
 
         // End of headers
-        if let Some(o) = res.find("\r\n\r\n") {
-            body_offset = Some(o + "\r\n\r\n".len());
+        if body_offset.is_none()
+            && let Some(o) = bytes.windows(4).position(|w| w == b"\r\n\r\n")
+        {
+            let offset = o + "\r\n\r\n".len();
+            body_offset = Some(offset);
+            let headers = str::from_utf8(&bytes[..offset]).map_err(Error::InvalidUtf8)?;
 
             // With all headers available we can see if there is any body
-            content_length = if let Some(length) = get_header(&res, "Content-Length") {
+            content_length = if let Some(length) = get_header(headers, "Content-Length") {
                 Some(length.trim().parse().map_err(Error::ContentLengthParsing)?)
             } else {
                 None
@@ -124,13 +132,14 @@ fn parse_http_response(socket: &mut dyn Read) -> Result<Option<String>, Error> {
 
         if let Some(body_offset) = body_offset
             && let Some(content_length) = content_length
-            && res.len() >= content_length + body_offset
+            && bytes.len() >= content_length + body_offset
         {
             break;
         }
     }
+    let res = str::from_utf8(&bytes).map_err(Error::InvalidUtf8)?;
     let body_string = content_length.and(body_offset.map(|o| String::from(&res[o..])));
-    let status_code = get_status_code(&res)?;
+    let status_code = get_status_code(res)?;
 
     if status_code.is_server_error() {
         Err(Error::ServerResponse(status_code, body_string))
@@ -229,4 +238,36 @@ pub fn simple_api_command<T: Read + Write + ScmSocket>(
     request_body: Option<&str>,
 ) -> Result<(), Error> {
     simple_api_command_with_fds(socket, method, c, request_body, &[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns at most one byte per read, splitting multi-byte characters.
+    struct ByteReader<'a>(&'a [u8]);
+
+    impl Read for ByteReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Some((first, rest)) = self.0.split_first() else {
+                return Ok(0);
+            };
+            buf[0] = *first;
+            self.0 = rest;
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn test_parse_http_response_split_utf8() {
+        let body = "{\"path\":\"/tmp/d\u{e4}t\u{e9}n\"}";
+        let response = format!(
+            "HTTP/1.1 200 \r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+
+        let parsed = parse_http_response(&mut ByteReader(response.as_bytes())).unwrap();
+
+        assert_eq!(parsed.as_deref(), Some(body));
+    }
 }
