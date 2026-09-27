@@ -124,6 +124,14 @@ macro_rules! extract_bits_64_without_offset {
 
 pub const CPU_MANAGER_ACPI_SIZE: usize = 0xc;
 
+/// Poll interval while waiting for vCPU threads to acknowledge a signal,
+/// pause or resume. vCPUs usually react within tens of microseconds.
+const VCPU_ACK_POLL_INTERVAL: time::Duration = time::Duration::from_micros(50);
+/// Re-signal a vCPU thread that did not acknowledge within this time.
+const VCPU_SIGNAL_RETRY_INTERVAL: time::Duration = time::Duration::from_millis(10);
+/// Give up if a vCPU thread did not acknowledge within this time.
+const VCPU_SIGNAL_ACK_TIMEOUT: time::Duration = time::Duration::from_secs(1);
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Error creating vCPU")]
@@ -814,20 +822,26 @@ impl VcpuState {
     /// This is the counterpart of [`Self::signal_thread`].
     fn wait_until_signal_acknowledged(&self) -> Result<()> {
         if let Some(_handle) = self.handle.as_ref() {
-            let mut count = 0;
+            let start = time::Instant::now();
+            let mut next_retry = start + VCPU_SIGNAL_RETRY_INTERVAL;
             loop {
                 if self.vcpu_run_interrupted.load(Ordering::SeqCst) {
                     return Ok(());
                 }
                 // This is more effective than thread::yield_now() at
                 // avoiding a priority inversion with the vCPU thread
-                thread::sleep(time::Duration::from_millis(1));
-                count += 1;
-                if count >= 1000 {
+                thread::sleep(VCPU_ACK_POLL_INTERVAL);
+                let now = time::Instant::now();
+                let elapsed = now - start;
+                if elapsed >= VCPU_SIGNAL_ACK_TIMEOUT {
                     return Err(Error::SignalAcknowledgeTimeout);
-                } else if count % 10 == 0 {
-                    warn!("vCPU thread did not respond in {count}ms to signal - retrying");
+                } else if now >= next_retry {
+                    warn!(
+                        "vCPU thread did not respond in {}ms to signal - retrying",
+                        elapsed.as_millis()
+                    );
                     self.signal_thread();
+                    next_retry = now + VCPU_SIGNAL_RETRY_INTERVAL;
                 }
             }
         }
@@ -2771,7 +2785,7 @@ impl Pausable for CpuManager {
                 // wait for vCPU to update state
                 while !state.paused.load(Ordering::SeqCst) {
                     // To avoid a priority inversion with the vCPU thread
-                    thread::sleep(time::Duration::from_millis(1));
+                    thread::sleep(VCPU_ACK_POLL_INTERVAL);
                 }
             }
         }
@@ -2799,7 +2813,7 @@ impl Pausable for CpuManager {
                 // wait for vCPU to update state
                 while state.paused.load(Ordering::SeqCst) {
                     // To avoid a priority inversion with the vCPU thread
-                    thread::sleep(time::Duration::from_millis(1));
+                    thread::sleep(VCPU_ACK_POLL_INTERVAL);
                 }
             }
         }
