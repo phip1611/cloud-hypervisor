@@ -72,6 +72,14 @@ impl CompletionCommon {
         self.eventfd.write(1).unwrap();
     }
 
+    /// Enqueues a completion without signaling the eventfd.
+    ///
+    /// For completions whose wakeup was already signaled, e.g. by the
+    /// kernel, and that are drained by the caller right away.
+    pub(crate) fn enqueue(&mut self, completion: AsyncIoCompletion) {
+        self.queue.push_back(completion);
+    }
+
     pub(crate) fn next_completed(&mut self) -> Option<AsyncIoCompletion> {
         self.queue.pop_front()
     }

@@ -141,8 +141,9 @@ impl AioDataIo {
                 return None;
             }
         };
+        // The kernel already signaled the eventfd for each event (aio_resfd).
         for event in &events[..rc] {
-            self.completions.complete(AsyncIoCompletion::new(
+            self.completions.enqueue(AsyncIoCompletion::new(
                 event.data,
                 event.res as i32,
                 self.in_flight
