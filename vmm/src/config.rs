@@ -221,7 +221,7 @@ pub enum ValidationError {
     #[error("Disk path and vhost socket both provided")]
     DiskSocketAndPath,
     /// No image type specified for virtio-block
-    #[error("Image type required for disk")]
+    #[error("Image type required for disk: set image_type to raw, qcow2, vhd, vhdx or vmdk")]
     ImageTypeRequired,
     /// Using vhost user requires shared memory
     #[error("Using vhost-user requires using shared memory or huge pages")]
