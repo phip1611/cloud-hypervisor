@@ -2446,7 +2446,7 @@ impl MemoryManager {
         n = cmp::min(n, num_pages);
 
         // Do not create threads to allocate less than 64 MiB of memory.
-        n = cmp::min(n, cmp::max(1, page_size * num_pages / (64 * (1 << 26))));
+        n = cmp::min(n, cmp::max(1, page_size * num_pages / (64 << 20)));
 
         n
     }
