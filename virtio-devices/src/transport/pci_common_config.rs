@@ -17,7 +17,7 @@ use virtio_queue::{Queue, QueueT};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable};
 
 use super::pci_device::VIRTQ_MSI_NO_VECTOR;
-use crate::VirtioDevice;
+use crate::{DEVICE_INIT, DEVICE_NEEDS_RESET, VirtioDevice};
 
 pub const VIRTIO_PCI_COMMON_CONFIG_ID: &str = "virtio_pci_common_config";
 
@@ -214,11 +214,12 @@ impl VirtioPciCommonConfig {
         }
     }
 
-    pub fn write(&mut self, offset: u64, data: &[u8], queues: &mut [Queue]) {
+    /// Returns true if the driver requested a device reset.
+    pub fn write(&mut self, offset: u64, data: &[u8], queues: &mut [Queue]) -> bool {
         assert!(data.len() <= 8);
 
         match data.len() {
-            1 => self.write_common_config_byte(offset, data[0]),
+            1 => return self.write_common_config_byte(offset, data[0]),
             2 => self.write_common_config_word(offset, LittleEndian::read_u16(data), queues),
             4 => {
                 self.write_common_config_dword(offset, LittleEndian::read_u32(data), queues);
@@ -226,6 +227,7 @@ impl VirtioPciCommonConfig {
             8 => self.write_common_config_qword(offset, LittleEndian::read_u64(data), queues),
             _ => error!("invalid data length for virtio write: len {}", data.len()),
         }
+        false
     }
 
     fn read_common_config_byte(&self, offset: u64) -> u8 {
@@ -241,12 +243,25 @@ impl VirtioPciCommonConfig {
         }
     }
 
-    fn write_common_config_byte(&mut self, offset: u64, value: u8) {
+    fn write_common_config_byte(&mut self, offset: u64, value: u8) -> bool {
         debug!("write_common_config_byte: offset 0x{offset:x}");
         match offset {
-            0x14 => self.driver_status.store(value, Ordering::Release),
+            0x14 if value == DEVICE_INIT as u8 => {
+                self.driver_status.store(value, Ordering::Release);
+                true
+            }
+            0x14 => {
+                // Only a reset clears NEEDS_RESET; a worker may set it concurrently.
+                let _ = self.driver_status.fetch_update(
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                    |status| Some(value | (status & DEVICE_NEEDS_RESET as u8)),
+                );
+                false
+            }
             _ => {
                 warn!("invalid virtio config byte write: 0x{offset:x}");
+                false
             }
         }
     }
@@ -603,6 +618,24 @@ mod tests {
             msix_config: Arc::new(AtomicU16::new(0)),
             msix_queues: Arc::new(Mutex::new(vec![0; 1])),
         }
+    }
+
+    #[test]
+    fn status_write_keeps_needs_reset_until_reset() {
+        let mut regs = make_regs(0);
+        let mut queues = Vec::new();
+        let needs_reset = DEVICE_NEEDS_RESET as u8;
+        regs.driver_status
+            .store(0x03 | needs_reset, Ordering::Release);
+
+        assert!(!regs.write(0x14, &[0x0b], &mut queues));
+        assert_eq!(
+            regs.driver_status.load(Ordering::Acquire),
+            0x0b | needs_reset
+        );
+
+        assert!(regs.write(0x14, &[0], &mut queues));
+        assert_eq!(regs.driver_status.load(Ordering::Acquire), 0);
     }
 
     #[test]

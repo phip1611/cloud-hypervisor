@@ -40,8 +40,8 @@ use super::pci_common_config::VirtioPciCommonConfigState;
 use crate::transport::{VIRTIO_PCI_COMMON_CONFIG_ID, VirtioPciCommonConfig, VirtioTransport};
 use crate::{
     ActivateResult, ActivationContext, DEVICE_ACKNOWLEDGE, DEVICE_DRIVER, DEVICE_DRIVER_OK,
-    DEVICE_FAILED, DEVICE_FEATURES_OK, DEVICE_INIT, GuestMemoryMmap, VirtioDevice,
-    VirtioDeviceType, VirtioInterrupt, VirtioInterruptType, mark_device_needs_reset,
+    DEVICE_FAILED, DEVICE_FEATURES_OK, GuestMemoryMmap, VirtioDevice, VirtioDeviceType,
+    VirtioInterrupt, VirtioInterruptType, mark_device_needs_reset,
 };
 
 /// Vector value used to disable MSI for a queue.
@@ -692,11 +692,6 @@ impl VirtioPciDevice {
         driver_status == ready_bits && (driver_status & DEVICE_FAILED as u8) == 0
     }
 
-    /// Determines if the driver has requested the device (re)init / reset itself
-    fn is_driver_init(&self) -> bool {
-        self.common_config.driver_status.load(Ordering::SeqCst) == DEVICE_INIT as u8
-    }
-
     pub fn config_bar_addr(&self) -> u64 {
         self.configuration.get_bar_addr(VIRTIO_CONFIG_BAR_INDEX)
     }
@@ -1223,10 +1218,12 @@ impl PciDevice for VirtioPciDevice {
 
     fn write_bar(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
         let initial_ready = self.is_driver_ready();
+        let mut reset_requested = false;
         match offset {
             o if o < COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE => {
-                self.common_config
-                    .write(o - COMMON_CONFIG_BAR_OFFSET, data, &mut self.queues);
+                reset_requested =
+                    self.common_config
+                        .write(o - COMMON_CONFIG_BAR_OFFSET, data, &mut self.queues);
             }
             o if (ISR_CONFIG_BAR_OFFSET..ISR_CONFIG_BAR_OFFSET + ISR_CONFIG_SIZE).contains(&o) => {
                 if let Some(v) = data.first() {
@@ -1297,7 +1294,7 @@ impl PciDevice for VirtioPciDevice {
 
         // The driver requested a reset by writing 0 to device_status. Per the
         // virtio spec this is permitted at any point in initialisation.
-        if self.is_driver_init() {
+        if reset_requested {
             if self.device_activated.swap(false, Ordering::SeqCst) {
                 let mut device = self.device.lock().unwrap();
                 device.reset();
@@ -1789,5 +1786,29 @@ mod tests {
 
         assert_eq!(dev.queue_evts()[0].read().unwrap(), 1);
         dev.queue_evts()[1].read().unwrap_err();
+    }
+
+    #[test]
+    fn status_write_resets_only_on_zero() {
+        let mut dev = make_virtio_pci_device_with_queues(1);
+        let status_offset = COMMON_CONFIG_BAR_OFFSET + 0x14;
+        let status = Arc::clone(&dev.common_config.driver_status);
+
+        dev.write_bar(0, status_offset, &[DEVICE_ACKNOWLEDGE as u8]);
+        dev.write_bar(0, COMMON_CONFIG_BAR_OFFSET + 0x16, &[1, 0]);
+        // What a failing worker thread does.
+        status.fetch_or(DEVICE_NEEDS_RESET as u8, Ordering::SeqCst);
+
+        let driver = (DEVICE_ACKNOWLEDGE | DEVICE_DRIVER) as u8;
+        dev.write_bar(0, status_offset, &[driver]);
+        assert_eq!(
+            status.load(Ordering::SeqCst),
+            driver | DEVICE_NEEDS_RESET as u8
+        );
+        assert_eq!(dev.common_config.queue_select, 1);
+
+        dev.write_bar(0, status_offset, &[0]);
+        assert_eq!(status.load(Ordering::SeqCst), 0);
+        assert_eq!(dev.common_config.queue_select, 0);
     }
 }
