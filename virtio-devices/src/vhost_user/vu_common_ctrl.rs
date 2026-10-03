@@ -179,8 +179,16 @@ impl VhostUserHandle {
         // Mask out any frontend only negotiated features
         let acked_features = acked_features & self.backend_features;
 
+        // Dirty logging may have been started before this (re)activation.
+        let dirty_logging = self.shm_log.is_some();
+        let features = if dirty_logging {
+            acked_features | VhostUserVirtioFeatures::LOG_ALL.bits()
+        } else {
+            acked_features
+        };
+
         self.vu
-            .set_features(acked_features)
+            .set_features(features)
             .map_err(Error::VhostUserSetFeatures)?;
 
         // Update internal value after it's been sent to the backend.
@@ -227,7 +235,11 @@ impl VhostUserHandle {
             let config_data = VringConfigData {
                 queue_max_size: queue.max_size(),
                 queue_size: queue.size(),
-                flags: 0u32,
+                flags: if dirty_logging {
+                    1 << VHOST_VRING_F_LOG
+                } else {
+                    0
+                },
                 desc_table_addr: get_host_address_range(
                     mem,
                     GuestAddress(queue.desc_table()),
@@ -250,7 +262,7 @@ impl VhostUserHandle {
                     4 + actual_size * 2,
                 )
                 .ok_or(Error::AvailAddress)? as u64,
-                log_addr: None,
+                log_addr: dirty_logging.then_some(queue.used_ring()),
             };
 
             vrings_info.push(VringInfo {

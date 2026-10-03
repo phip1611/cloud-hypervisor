@@ -877,18 +877,22 @@ impl VhostUserCommon {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
+    use vhost::vhost_kern::vhost_binding::VHOST_VRING_F_LOG;
     use vhost::vhost_user::message::{FrontendReq, VhostUserHeaderFlag};
-    use vm_memory::GuestAddress;
+    use virtio_queue::QueueT;
+    use vm_memory::{FileOffset, GuestAddress};
     use vmm_sys_util::tempdir::TempDir;
+    use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
-    use crate::{MmapRegion, VirtioDevice, VirtioDeviceType};
+    use crate::{MmapRegion, VirtioDevice, VirtioDeviceType, VirtioInterruptType};
 
     fn read_request(stream: &mut UnixStream, expected_request: FrontendReq) {
         let mut header = [0u8; 12];
@@ -935,6 +939,27 @@ mod tests {
 
         (vu, backend.join().unwrap())
     }
+
+    struct NoopInterrupt;
+
+    impl VirtioInterrupt for NoopInterrupt {
+        fn trigger(&self, _int_type: VirtioInterruptType) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn set_notifier(
+            &self,
+            _int_type: u32,
+            _notifier: Option<EventFd>,
+            _vm: &dyn hypervisor::Vm,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopReqHandler;
+
+    impl VhostUserFrontendReqHandler for NoopReqHandler {}
 
     #[test]
     fn connect_retries_get_features_disconnect_with_fresh_socket() {
@@ -1083,5 +1108,68 @@ mod tests {
         let region = MmapRegion::new(0x1000).unwrap();
         let region = Arc::new(GuestRegionMmap::new(region, GuestAddress(0)).unwrap());
         common.add_memory_region(&region).unwrap();
+    }
+
+    #[test]
+    fn activation_keeps_dirty_logging_enabled() {
+        let features = VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
+            | VhostUserVirtioFeatures::LOG_ALL.bits();
+        let (mut vu, mut stream) = connect_handle(features);
+        // Records the last payload of each request type and acks SET_LOG_BASE.
+        let backend = thread::spawn(move || {
+            let mut requests = HashMap::new();
+            let mut header = [0u8; 12];
+            while stream.read_exact(&mut header).is_ok() {
+                let request = u32::from_ne_bytes(header[0..4].try_into().unwrap());
+                let size = u32::from_ne_bytes(header[8..12].try_into().unwrap());
+                let mut payload = vec![0u8; size as usize];
+                stream.read_exact(&mut payload).unwrap();
+                if request == u32::from(FrontendReq::SET_LOG_BASE) {
+                    let flags = VhostUserHeaderFlag::REPLY.bits() | 1;
+                    header[4..8].copy_from_slice(&flags.to_ne_bytes());
+                    stream.write_all(&header).unwrap();
+                    stream.write_all(&payload).unwrap();
+                }
+                requests.insert(request, payload);
+            }
+            requests
+        });
+
+        vu.set_protocol_features_vhost_user(features, VhostUserProtocolFeatures::LOG_SHMFD.bits())
+            .unwrap();
+
+        let file = TempFile::new().unwrap().into_file();
+        file.set_len(0x10000).unwrap();
+        let mem = GuestMemoryMmap::from_ranges_with_files(&[(
+            GuestAddress(0),
+            0x10000,
+            Some(FileOffset::new(file, 0)),
+        )])
+        .unwrap();
+
+        // Dirty logging starts before the device gets activated.
+        vu.start_dirty_log(mem.last_addr().raw_value()).unwrap();
+
+        let queue_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let queues = [(0, Queue::new(64).unwrap(), queue_evt)];
+        vu.setup_vhost_user(
+            &mem,
+            &queues,
+            &NoopInterrupt,
+            features,
+            &None::<FrontendReqHandler<NoopReqHandler>>,
+            None,
+            None,
+        )
+        .unwrap();
+        drop(vu);
+
+        let requests = backend.join().unwrap();
+        let set_features = &requests[&u32::from(FrontendReq::SET_FEATURES)];
+        let set_features = u64::from_ne_bytes(set_features[..8].try_into().unwrap());
+        assert_ne!(set_features & VhostUserVirtioFeatures::LOG_ALL.bits(), 0);
+        let vring_addr = &requests[&u32::from(FrontendReq::SET_VRING_ADDR)];
+        let vring_flags = u32::from_ne_bytes(vring_addr[4..8].try_into().unwrap());
+        assert_ne!(vring_flags & (1 << VHOST_VRING_F_LOG), 0);
     }
 }
