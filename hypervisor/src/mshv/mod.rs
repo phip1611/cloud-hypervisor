@@ -363,13 +363,13 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                 #[cfg(feature = "sev_snp")]
                 sev_snp_enabled: mshv_vm_type == VmType::Snp,
                 #[cfg(feature = "sev_snp")]
-                host_access_pages: ArcSwap::new(
+                host_access_pages: Arc::new(ArcSwap::new(
                     AtomicBitmap::new(
                         _config.mem_size as usize,
                         NonZeroUsize::new(HV_PAGE_SIZE).unwrap(),
                     )
                     .into(),
-                ),
+                )),
             }))
         }
 
@@ -465,7 +465,7 @@ pub struct MshvVcpu {
     #[cfg(feature = "sev_snp")]
     ghcb: Option<Ghcb>,
     #[cfg(feature = "sev_snp")]
-    host_access_pages: ArcSwap<AtomicBitmap>,
+    host_access_pages: Arc<ArcSwap<AtomicBitmap>>,
 }
 
 /// Implementation of Vcpu trait for Microsoft Hypervisor
@@ -740,7 +740,10 @@ impl cpu::Vcpu for MshvVcpu {
                     // Update the bitmap(cache) to mark the pages as host inaccessible
                     self.host_access_pages.rcu(|bitmap| {
                         let bm = Arc::clone(bitmap);
-                        bm.reset_addr_range(gfn_start as usize, gfn_count as usize);
+                        bm.reset_addr_range(
+                            gfn_start as usize * HV_PAGE_SIZE,
+                            gfn_count as usize * HV_PAGE_SIZE,
+                        );
                         bm
                     });
 
@@ -775,10 +778,10 @@ impl cpu::Vcpu for MshvVcpu {
                         .map_err(|e| cpu::HypervisorCpuError::RunVcpu(anyhow!(
                             "Unhandled VCPU exit: attribute intercept - couldn't modify host access {e}"
                         )))?;
-                    // Guest is revoking the shared access, so we need to update the bitmap
-                    self.host_access_pages.rcu(|_bitmap| {
-                        let bm = self.host_access_pages.load().as_ref().clone();
-                        bm.reset_addr_range(gpa_start as usize, gfn_count as usize);
+                    // Clear again, in case gain_page_access() set the bits before the release
+                    self.host_access_pages.rcu(|bitmap| {
+                        let bm = Arc::clone(bitmap);
+                        bm.reset_addr_range(gpa_start as usize, gfn_count as usize * HV_PAGE_SIZE);
                         bm
                     });
                     Ok(cpu::VmExit::Ignore)
@@ -1801,7 +1804,7 @@ pub struct MshvVm {
     #[cfg(feature = "sev_snp")]
     sev_snp_enabled: bool,
     #[cfg(feature = "sev_snp")]
-    host_access_pages: ArcSwap<AtomicBitmap>,
+    host_access_pages: Arc<ArcSwap<AtomicBitmap>>,
 }
 
 impl MshvVm {
@@ -1944,8 +1947,9 @@ impl vm::Vm for MshvVm {
             vm_fd: Arc::clone(&self.fd),
             #[cfg(feature = "sev_snp")]
             ghcb,
+            // Shared with the VM, so that both see revocations and enlargements.
             #[cfg(feature = "sev_snp")]
-            host_access_pages: ArcSwap::new(self.host_access_pages.load().clone()),
+            host_access_pages: Arc::clone(&self.host_access_pages),
         };
         Ok(Box::new(vcpu))
     }
