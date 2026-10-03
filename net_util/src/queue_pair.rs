@@ -188,6 +188,8 @@ pub struct RxVirtio {
     pub counter_bytes: Wrapping<u64>,
     pub counter_frames: Wrapping<u64>,
     iovecs: IovecBuffer,
+    // Guest address and length behind each iovec.
+    bufs: Vec<(GuestAddress, usize)>,
 }
 
 impl Default for RxVirtio {
@@ -202,6 +204,7 @@ impl RxVirtio {
             counter_bytes: Wrapping(0),
             counter_frames: Wrapping(0),
             iovecs: IovecBuffer::new(),
+            bufs: Vec::new(),
         }
     }
 
@@ -230,6 +233,7 @@ impl RxVirtio {
             }
 
             let mut iovecs = self.iovecs.borrow();
+            self.bufs.clear();
             // Parse the descriptor chain into an iovec array. On error, the
             // offending head descriptor is still added to the used ring with
             // len 0 below, so the guest does not see a descriptor leak.
@@ -272,6 +276,7 @@ impl RxVirtio {
                             iov_len: desc.len() as libc::size_t,
                         };
                         iovecs.push(iovec);
+                        self.bufs.push((desc_addr, desc.len() as usize));
                     } else {
                         error!(
                             "Invalid descriptor chain: address = 0x{:x} length = {} write_only = {}",
@@ -357,6 +362,19 @@ impl RxVirtio {
                     result as u32
                 }
             };
+
+            // readv() wrote through raw pointers, bypassing the dirty bitmap.
+            let mut remaining = len as usize;
+            for (addr, buf_len) in &self.bufs {
+                if remaining == 0 {
+                    break;
+                }
+                let n = remaining.min(*buf_len);
+                if let Ok(buf) = desc_chain.memory().get_slice(*addr, n) {
+                    buf.bitmap().mark_dirty(0, n);
+                }
+                remaining -= n;
+            }
 
             // For the sake of simplicity (keeping the handling of RX_QUEUE_EVENT and
             // RX_TAP_EVENT totally asynchronous), we always let the 'last' descriptor
@@ -581,5 +599,67 @@ impl NetQueuePair {
         queue
             .needs_notification(mem)
             .map_err(NetQueuePairError::QueueNeedsNotification)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixDatagram;
+
+    use vm_memory::bitmap::AtomicBitmap;
+    use vm_memory::{GuestMemoryMmap, GuestMemoryRegion};
+
+    use super::*;
+
+    #[test]
+    fn rx_marks_all_written_pages_dirty() {
+        const DESC_TABLE: u64 = 0x1000;
+        const AVAIL_RING: u64 = 0x2000;
+        const USED_RING: u64 = 0x3000;
+        const BUF0: u64 = 0x10000;
+        const BUF1: u64 = 0x20000;
+        const F_NEXT: u16 = 1;
+        const F_WRITE: u16 = 2;
+
+        let mem =
+            GuestMemoryMmap::<AtomicBitmap>::from_ranges(&[(GuestAddress(0), 0x10_0000)]).unwrap();
+
+        // One RX chain of two device-writable buffers in different pages.
+        let write_desc = |idx: u64, addr: u64, flags: u16, next: u16| {
+            let desc = DESC_TABLE + idx * 16;
+            mem.write_obj(addr, GuestAddress(desc)).unwrap();
+            mem.write_obj(0x1000u32, GuestAddress(desc + 8)).unwrap();
+            mem.write_obj(flags, GuestAddress(desc + 12)).unwrap();
+            mem.write_obj(next, GuestAddress(desc + 14)).unwrap();
+        };
+        write_desc(0, BUF0, F_NEXT | F_WRITE, 1);
+        write_desc(1, BUF1, F_WRITE, 0);
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING + 4)).unwrap();
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING + 2)).unwrap();
+
+        let mut queue = Queue::new(256).unwrap();
+        queue.set_desc_table_address(Some(DESC_TABLE as u32), None);
+        queue.set_avail_ring_address(Some(AVAIL_RING as u32), None);
+        queue.set_used_ring_address(Some(USED_RING as u32), None);
+        queue.set_ready(true);
+
+        // A frame that spills from the first buffer into the second one.
+        let (tx, rx) = UnixDatagram::pair().unwrap();
+        rx.set_nonblocking(true).unwrap();
+        tx.send(&[0xab; 6000]).unwrap();
+        let tap = Tap::new_for_fuzzing(File::from(OwnedFd::from(rx)), "test");
+
+        RxVirtio::new()
+            .process_desc_chain(&mem, &tap, &mut queue, &mut None, None)
+            .unwrap();
+
+        assert_eq!(mem.read_obj::<u8>(GuestAddress(BUF1 + 100)).unwrap(), 0xab);
+        let bitmap = mem.find_region(GuestAddress(0)).unwrap().bitmap();
+        assert!(bitmap.dirty_at(BUF0 as usize));
+        assert!(bitmap.dirty_at(BUF1 as usize));
+        // Only 6000 - 4096 bytes were written to the second buffer.
+        assert!(!bitmap.dirty_at(BUF1 as usize + 0x1000));
     }
 }
