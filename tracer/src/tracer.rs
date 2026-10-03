@@ -3,14 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#![expect(static_mut_refs)]
-
-use std::cell::OnceCell;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,17 +16,15 @@ use serde::Serialize;
 
 #[derive(Debug)]
 struct Tracer {
-    events: Arc<Mutex<HashMap<String, Vec<TraceEvent>>>>,
-    thread_depths: HashMap<String, Arc<AtomicU64>>,
+    events: HashMap<String, Vec<TraceEvent>>,
     start: Instant,
 }
 
 impl Tracer {
     fn new() -> Self {
         Self {
-            events: Arc::new(Mutex::new(HashMap::default())),
+            events: HashMap::default(),
             start: Instant::now(),
-            thread_depths: HashMap::default(),
         }
     }
 
@@ -40,14 +35,14 @@ impl Tracer {
         let mut file = File::create(&path).unwrap();
 
         #[derive(Serialize)]
-        struct TraceReport {
+        struct TraceReport<'a> {
             duration: Duration,
-            events: Arc<Mutex<HashMap<String, Vec<TraceEvent>>>>,
+            events: &'a HashMap<String, Vec<TraceEvent>>,
         }
 
         let trace_report = TraceReport {
             duration: end.duration_since(self.start),
-            events: Arc::clone(&self.events),
+            events: &self.events,
         };
 
         serde_json::to_writer_pretty(&file, &trace_report).unwrap();
@@ -60,46 +55,21 @@ impl Tracer {
     fn add_event(&mut self, event: TraceEvent) {
         let current = thread::current();
         let thread_name = current.name().unwrap_or("");
-        let mut events = self.events.lock().unwrap();
-        if let Some(thread_events) = events.get_mut(thread_name) {
+        if let Some(thread_events) = self.events.get_mut(thread_name) {
             thread_events.push(event);
         } else {
-            events.insert(thread_name.to_string(), vec![event]);
+            self.events.insert(thread_name.to_string(), vec![event]);
         }
-    }
-
-    fn increase_thread_depth(&mut self) {
-        let current = thread::current();
-        let thread_name = current.name().unwrap_or("");
-        if let Some(depth) = self.thread_depths.get_mut(thread_name) {
-            depth.fetch_add(1, Ordering::SeqCst);
-        } else {
-            self.thread_depths
-                .insert(thread_name.to_string(), Arc::new(AtomicU64::new(0)));
-        }
-    }
-
-    fn decrease_thread_depth(&mut self) {
-        let current = thread::current();
-        let thread_name = current.name().unwrap_or("");
-        if let Some(depth) = self.thread_depths.get_mut(thread_name) {
-            depth.fetch_sub(1, Ordering::SeqCst);
-        } else {
-            panic!("Unmatched decrease for thread: {thread_name}");
-        }
-    }
-
-    fn thread_depth(&self) -> u64 {
-        let current = thread::current();
-        let thread_name = current.name().unwrap_or("");
-        self.thread_depths
-            .get(thread_name)
-            .map(|v| v.load(Ordering::SeqCst))
-            .unwrap_or_default()
     }
 }
 
-static mut TRACER: OnceCell<Tracer> = OnceCell::new();
+// `None` until start() is called. Tracing is a no-op in that state.
+static TRACER: Mutex<Option<Tracer>> = Mutex::new(None);
+
+thread_local! {
+    // Number of open trace blocks on this thread.
+    static OPEN_BLOCKS: Cell<u64> = const { Cell::new(0) };
+}
 
 #[derive(Clone, Debug, Serialize)]
 struct TraceEvent {
@@ -110,17 +80,14 @@ struct TraceEvent {
 }
 
 pub fn trace_point_log(event: &'static str) {
-    let trace_event = TraceEvent {
-        // SAFETY: start has been initialised as part of initialising the value of TRACER
-        timestamp: Instant::now().duration_since(unsafe { TRACER.get().unwrap().start }),
-        event,
-        end_timestamp: None,
-        // SAFETY: thread_depth accesses current thread only specific data
-        depth: unsafe { TRACER.get().unwrap().thread_depth() },
-    };
-    // SAFETY: add_event accesses current thread only specific data
-    unsafe {
-        TRACER.get_mut().unwrap().add_event(trace_event);
+    if let Some(tracer) = TRACER.lock().unwrap().as_mut() {
+        let trace_event = TraceEvent {
+            timestamp: Instant::now().duration_since(tracer.start),
+            event,
+            end_timestamp: None,
+            depth: OPEN_BLOCKS.get().saturating_sub(1),
+        };
+        tracer.add_event(trace_event);
     }
 }
 
@@ -131,10 +98,7 @@ pub struct TraceBlock {
 
 impl TraceBlock {
     pub fn new(event: &'static str) -> Self {
-        // SAFETY: increase_thread_depth accesses current thread only specific data
-        unsafe {
-            TRACER.get_mut().unwrap().increase_thread_depth();
-        }
+        OPEN_BLOCKS.set(OPEN_BLOCKS.get() + 1);
         Self {
             start: Instant::now(),
             event,
@@ -144,19 +108,16 @@ impl TraceBlock {
 
 impl Drop for TraceBlock {
     fn drop(&mut self) {
-        // SAFETY: start has been initialised as part of initialising the value of TRACER
-        let start = unsafe { TRACER.get().unwrap().start };
-        let trace_event = TraceEvent {
-            timestamp: self.start.duration_since(start),
-            event: self.event,
-            end_timestamp: Some(Instant::now().duration_since(start)),
-            // SAFETY: thread_depth() returns a number local to the current thread
-            depth: unsafe { TRACER.get().unwrap().thread_depth() },
-        };
-        // SAFETY: add_event and decrease_thread_depth access current thread only specific data
-        unsafe {
-            TRACER.get_mut().unwrap().add_event(trace_event);
-            TRACER.get_mut().unwrap().decrease_thread_depth();
+        let depth = OPEN_BLOCKS.get().saturating_sub(1);
+        OPEN_BLOCKS.set(depth);
+        if let Some(tracer) = TRACER.lock().unwrap().as_mut() {
+            let trace_event = TraceEvent {
+                timestamp: self.start.duration_since(tracer.start),
+                event: self.event,
+                end_timestamp: Some(Instant::now().duration_since(tracer.start)),
+                depth,
+            };
+            tracer.add_event(trace_event);
         }
     }
 }
@@ -176,11 +137,48 @@ macro_rules! trace_scoped {
 }
 
 pub fn end() {
-    // SAFETY: this is called after all other threads end
-    unsafe { TRACER.get().unwrap().end() }
+    if let Some(tracer) = TRACER.lock().unwrap().as_ref() {
+        tracer.end();
+    }
 }
 
 pub fn start() {
-    // SAFETY: this is called before other threads start
-    unsafe { TRACER.set(Tracer::new()).unwrap() }
+    *TRACER.lock().unwrap() = Some(Tracer::new());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A single test, as the tracer is global state.
+    #[test]
+    fn test_tracing_without_start_and_restart() {
+        {
+            crate::trace_scoped!("not-started");
+            crate::trace_point!("not-started");
+        }
+        end();
+        assert!(TRACER.lock().unwrap().is_none());
+
+        start();
+        {
+            crate::trace_scoped!("outer");
+            crate::trace_point!("point");
+            crate::trace_scoped!("inner");
+        }
+        let depths: Vec<_> = TRACER
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .events
+            .values()
+            .flatten()
+            .map(|e| (e.event, e.depth))
+            .collect();
+        assert_eq!(depths, [("point", 0), ("inner", 1), ("outer", 0)]);
+
+        start();
+        assert!(TRACER.lock().unwrap().as_ref().unwrap().events.is_empty());
+    }
 }
