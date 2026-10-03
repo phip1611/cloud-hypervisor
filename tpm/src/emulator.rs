@@ -87,6 +87,8 @@ pub struct Emulator {
     caps: PtmCap, /* capabilities of the TPM */
     control_socket: SocketDev,
     data_socket: Option<UnixStream>,
+    // A command was sent whose response was not received (yet).
+    response_pending: bool,
     established_bit_cached: bool,
     established_bit: bool,
 }
@@ -114,6 +116,7 @@ impl Emulator {
             caps: 0,
             control_socket: socket,
             data_socket: None,
+            response_pending: false,
             established_bit_cached: false,
             established_bit: false,
         };
@@ -331,15 +334,27 @@ impl Emulator {
     pub fn deliver_request(&mut self, cmd: &mut BackendCmd) -> Result<()> {
         let isselftest = is_selftest(&cmd.buffer[0..cmd.input_len]);
 
+        let mut data_socket = self
+            .data_socket
+            .as_ref()
+            .ok_or_else(|| Error::SendReceive(anyhow!("TPM data socket has not been prepared")))?;
+
+        // A late response would otherwise be taken for the response to `cmd`.
+        if self.response_pending {
+            let mut stale = [0u8; TPM_CRB_BUFFER_MAX];
+            data_socket.read(&mut stale).map_err(|e| {
+                Error::SendReceive(anyhow!(
+                    "Response to previous tpm command is still outstanding. Error Code {e:?}"
+                ))
+            })?;
+            self.response_pending = false;
+        }
+
         debug!(
             "Send cmd: {:02X?}  of len {:?} on data_ioc ",
             cmd.buffer, cmd.input_len
         );
 
-        let mut data_socket = self
-            .data_socket
-            .as_ref()
-            .ok_or_else(|| Error::SendReceive(anyhow!("TPM data socket has not been prepared")))?;
         data_socket
             .write_all(&cmd.buffer[..cmd.input_len])
             .map_err(|e| {
@@ -347,12 +362,14 @@ impl Emulator {
                     "Failed to send tpm command over Data FD. Error Code {e:?}"
                 ))
             })?;
+        self.response_pending = true;
 
         let output_len = data_socket.read(cmd.buffer).map_err(|e| {
             Error::SendReceive(anyhow!(
                 "Failed to receive response for tpm command over Data FD. Error Code {e:?}"
             ))
         })?;
+        self.response_pending = false;
         debug!(
             "response = {:02X?} len = {:?} selftest = {:?}",
             cmd.buffer, output_len, isselftest
@@ -450,7 +467,56 @@ impl Emulator {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::Duration;
+
     use super::*;
+
+    #[test]
+    fn test_late_response_is_not_taken_for_next_command() {
+        let (data, mut swtpm) = UnixStream::pair().unwrap();
+        data.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut emulator = Emulator {
+            caps: 0,
+            control_socket: SocketDev::new(),
+            data_socket: Some(data),
+            response_pending: false,
+            established_bit_cached: false,
+            established_bit: false,
+        };
+        let mut deliver = |input: &[u8; 4]| {
+            let mut buffer = *input;
+            let mut cmd = BackendCmd {
+                buffer: &mut buffer,
+                input_len: input.len(),
+            };
+            emulator.deliver_request(&mut cmd).map(|()| buffer)
+        };
+
+        let mut buf = [0u8; 16];
+
+        // The response to the first command arrives after the receive timeout.
+        deliver(b"cmd1").unwrap_err();
+        assert_eq!(swtpm.read(&mut buf).unwrap(), 4);
+        swtpm.write_all(b"rsp1").unwrap();
+
+        let peer = thread::spawn(move || {
+            assert_eq!(swtpm.read(&mut buf).unwrap(), 4);
+            swtpm.write_all(b"rsp2").unwrap();
+            swtpm
+        });
+        assert_eq!(&deliver(b"cmd2").unwrap(), b"rsp2");
+        let mut swtpm = peer.join().unwrap();
+
+        // No command is sent while a response is outstanding.
+        deliver(b"cmd3").unwrap_err();
+        deliver(b"cmd4").unwrap_err();
+        let n = swtpm.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"cmd3");
+    }
 
     #[test]
     fn test_startup_response_accepts_success_and_initialized() {
