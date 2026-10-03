@@ -330,22 +330,29 @@ pub struct VirtioPciDeviceActivator {
 
 impl VirtioPciDeviceActivator {
     pub fn activate(mut self) -> ActivateResult {
-        let result = self.device.lock().unwrap().activate(ActivationContext {
-            mem: self.memory.take().unwrap(),
-            interrupt_cb: Arc::clone(&self.interrupt),
-            queues: self.queues.take().unwrap(),
-            device_status: Arc::clone(&self.status),
-        });
+        // The driver may have reset the device while the activation was pending.
+        let result = if self.status.load(Ordering::SeqCst) & DEVICE_DRIVER_OK as u8 != 0 {
+            let result = self.device.lock().unwrap().activate(ActivationContext {
+                mem: self.memory.take().unwrap(),
+                interrupt_cb: Arc::clone(&self.interrupt),
+                queues: self.queues.take().unwrap(),
+                device_status: Arc::clone(&self.status),
+            });
 
-        if let Err(e) = &result {
-            mark_device_needs_reset(
-                &self.status,
-                self.interrupt.as_ref(),
-                format_args!("{}: virtio device activation failed: {e:?}", self.id),
-            );
+            if let Err(e) = &result {
+                mark_device_needs_reset(
+                    &self.status,
+                    self.interrupt.as_ref(),
+                    format_args!("{}: virtio device activation failed: {e:?}", self.id),
+                );
+            } else {
+                self.device_activated.store(true, Ordering::SeqCst);
+            }
+            result
         } else {
-            self.device_activated.store(true, Ordering::SeqCst);
-        }
+            info!("{}: Driver is no longer ready; not activating", self.id);
+            Ok(())
+        };
 
         // Release the barrier regardless of outcome. A failing activate()
         // would otherwise deadlock the vCPU that wrote DRIVER_OK.
@@ -1650,6 +1657,23 @@ mod tests {
         assert!(interrupt.triggers.lock().unwrap().is_empty());
 
         waiter.join().expect("barrier waiter deadlocked");
+    }
+
+    #[test]
+    fn activate_after_reset_is_skipped_and_releases_barrier() {
+        let (activator, status, device_activated, interrupt, barrier) = make_activator(Ok(()));
+        // The driver reset the device while the activation was pending.
+        status.store(0, Ordering::SeqCst);
+
+        let waiter = thread::spawn(move || barrier.wait());
+
+        activator.activate().unwrap();
+
+        assert!(!device_activated.load(Ordering::SeqCst));
+        assert_eq!(status.load(Ordering::SeqCst), 0);
+        assert!(interrupt.triggers.lock().unwrap().is_empty());
+
+        waiter.join().expect("activator should release the barrier");
     }
 
     struct TestInterruptManager;
