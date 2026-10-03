@@ -251,7 +251,6 @@ impl Request {
         // Queue operations expected to be submitted.
         match request_type {
             RequestType::In => {
-                self.mark_read_dirty(&mem)?;
                 let op = self.build_data_operation(mem, offset, alignment, user_data)?;
                 if disk_image.batch_requests_enabled() {
                     ret.batch_request = Some(op);
@@ -528,16 +527,23 @@ impl Request {
             .sum()
     }
 
-    // Marks guest-memory read destinations dirty before submitting async IO.
+    // Marks the first `len` bytes of the read destinations dirty.
     fn mark_read_dirty<B: Bitmap + 'static>(
         &self,
         mem: &vm_memory::GuestMemoryMmap<B>,
-    ) -> Result<(), ExecuteError> {
+        len: usize,
+    ) -> Result<(), Error> {
+        let mut remaining = len;
         for (data_addr, data_len) in &self.data_descriptors {
-            mem.get_slice(*data_addr, *data_len as usize)
-                .map_err(ExecuteError::GetHostAddress)?
+            if remaining == 0 {
+                break;
+            }
+            let data_len = (*data_len as usize).min(remaining);
+            mem.get_slice(*data_addr, data_len)
+                .map_err(Error::GuestMemory)?
                 .bitmap()
-                .mark_dirty(0, *data_len as usize);
+                .mark_dirty(0, data_len);
+            remaining -= data_len;
         }
         Ok(())
     }
@@ -582,12 +588,16 @@ impl Request {
         mem: &vm_memory::GuestMemoryMmap<B>,
         completion: &mut AsyncIoCompletion,
     ) -> Result<(), Error> {
-        if self.request_type == RequestType::In
-            && completion.result > 0
-            && let Some(buffer) = completion.buffer.take()
-        {
-            let len = (completion.result as usize).min(buffer.as_slice().len());
-            self.copy_buffer_to_guest(mem, &buffer.as_slice()[..len])?;
+        if self.request_type == RequestType::In && completion.result > 0 {
+            let len = completion.result as usize;
+            if let Some(buffer) = completion.buffer.take() {
+                let len = len.min(buffer.as_slice().len());
+                self.copy_buffer_to_guest(mem, &buffer.as_slice()[..len])?;
+            } else {
+                // The backend wrote through raw pointers, bypassing the dirty
+                // bitmap. Marking before the write could be harvested too early.
+                self.mark_read_dirty(mem, len)?;
+            }
         }
 
         Ok(())
@@ -706,5 +716,34 @@ mod tests {
         else {
             panic!("expected BadRequest(InvalidOffset)");
         };
+    }
+
+    #[test]
+    fn direct_read_is_marked_dirty_on_completion() {
+        use vm_memory::bitmap::AtomicBitmap;
+        use vm_memory::{GuestMemoryBackend, GuestMemoryRegion};
+
+        let mem =
+            GuestMemoryMmap::<AtomicBitmap>::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mut request = Request {
+            request_type: RequestType::In,
+            sector: 0,
+            data_descriptors: SmallVec::from_slice(&[
+                (GuestAddress(0x1000), 0x1000),
+                (GuestAddress(0x4000), 0x2000),
+            ]),
+            status_addr: GuestAddress(0),
+            writeback: true,
+            start: Instant::now(),
+        };
+
+        // The backend filled the first buffer and one page of the second.
+        let mut completion = AsyncIoCompletion::new(0, 0x2000, None);
+        request.complete_async(&mem, &mut completion).unwrap();
+
+        let bitmap = mem.find_region(GuestAddress(0)).unwrap().bitmap();
+        assert!(bitmap.dirty_at(0x1000));
+        assert!(bitmap.dirty_at(0x4000));
+        assert!(!bitmap.dirty_at(0x5000));
     }
 }
