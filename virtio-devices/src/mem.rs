@@ -885,14 +885,15 @@ impl Mem {
         &mut self,
         source: &VirtioMemMappingSource,
     ) -> result::Result<(), Error> {
+        // Taken first, so no block is plugged between removing and unmapping.
+        let config = self.config.lock().unwrap();
+
         let handler = self
             .dma_mapping_handlers
             .lock()
             .unwrap()
             .remove(source)
             .ok_or(Error::InvalidDmaMappingHandler)?;
-
-        let config = self.config.lock().unwrap();
 
         if config.plugged_size > 0 {
             for (idx, plugged) in self.blocks_state.lock().unwrap().inner().iter().enumerate() {
