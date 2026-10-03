@@ -884,7 +884,9 @@ impl VhostUserCommon {
 mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
 
     use vhost::vhost_user::message::{FrontendReq, VhostUserHeaderFlag};
     use vm_memory::{FileOffset, GuestAddress};
@@ -958,13 +960,7 @@ mod tests {
             let (mut second, _) = listener.accept().unwrap();
             assert!(read_request(&mut second, FrontendReq::SET_OWNER).is_empty());
             assert!(read_request(&mut second, FrontendReq::GET_FEATURES).is_empty());
-
-            let mut reply = Vec::with_capacity(20);
-            reply.extend_from_slice(&u32::from(FrontendReq::GET_FEATURES).to_ne_bytes());
-            reply.extend_from_slice(&(VhostUserHeaderFlag::REPLY.bits() | 1).to_ne_bytes());
-            reply.extend_from_slice(&8u32.to_ne_bytes());
-            reply.extend_from_slice(&0u64.to_ne_bytes());
-            second.write_all(&reply).unwrap();
+            write_reply(&mut second, FrontendReq::GET_FEATURES, 0);
         });
 
         let kill_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
@@ -1213,5 +1209,62 @@ mod tests {
                 .into(),
         );
         common.add_memory_region(&region).unwrap();
+    }
+
+    #[test]
+    fn server_connect_aborts_on_kill_evt() {
+        let temp_dir = TempDir::new_with_prefix("/tmp/vhost-user-server-").unwrap();
+        let socket_path = temp_dir.as_path().join("backend.sock");
+        let kill_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let thread_kill_evt = kill_evt.try_clone().unwrap();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = VhostUserHandle::connect_vhost_user(
+                true,
+                socket_path.to_str().unwrap(),
+                1,
+                false,
+                &thread_kill_evt,
+                |_| Ok(()),
+            );
+            tx.send(matches!(result, Err(Error::ConnectKilled)))
+                .unwrap();
+        });
+
+        kill_evt.write(1).unwrap();
+
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    }
+
+    #[test]
+    fn server_connect_accepts_backend() {
+        let temp_dir = TempDir::new_with_prefix("/tmp/vhost-user-server-").unwrap();
+        let socket_path = temp_dir.as_path().join("backend.sock");
+        let backend_socket_path = socket_path.clone();
+        let backend = thread::spawn(move || {
+            // The frontend binds the socket, so retry until it shows up.
+            let mut stream = loop {
+                match UnixStream::connect(&backend_socket_path) {
+                    Ok(stream) => break stream,
+                    Err(_) => thread::sleep(Duration::from_millis(10)),
+                }
+            };
+            assert!(read_request(&mut stream, FrontendReq::SET_OWNER).is_empty());
+            assert!(read_request(&mut stream, FrontendReq::GET_FEATURES).is_empty());
+            write_reply(&mut stream, FrontendReq::GET_FEATURES, 0);
+        });
+
+        let kill_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        VhostUserHandle::connect_vhost_user(
+            true,
+            socket_path.to_str().unwrap(),
+            1,
+            false,
+            &kill_evt,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        backend.join().unwrap();
     }
 }
