@@ -3,7 +3,7 @@
 
 use std::result;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 
 use event_monitor::event;
 use log::{error, info};
@@ -21,6 +21,7 @@ use vmm_sys_util::eventfd::EventFd;
 use super::vu_common_ctrl::VhostUserHandle;
 use super::{DEFAULT_VIRTIO_FEATURES, Error, Result};
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::vhost_user::{VhostUserCommon, VhostUserState};
 use crate::{
@@ -188,7 +189,7 @@ impl Fs {
                     avail_features,
                     acked_features,
                     queue_sizes: vec![queue_size; num_queues],
-                    paused_sync: Some(Arc::new(Barrier::new(2))),
+                    paused_sync: Some(Arc::new(PausedSync::default())),
                     min_queues: 1,
                     paused: Arc::new(AtomicBool::new(paused)),
                     ..Default::default()

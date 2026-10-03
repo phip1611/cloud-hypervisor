@@ -8,8 +8,8 @@
 
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Barrier};
 use std::{io, result};
 
 use anyhow::anyhow;
@@ -35,6 +35,7 @@ use super::{
     VirtioCommon, VirtioDevice, VirtioDeviceType,
 };
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{GuestMemoryMmap, VirtioInterrupt, VirtioInterruptType};
 
@@ -221,7 +222,7 @@ impl PmemEpollHandler {
     fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.queue_evt.as_raw_fd(), QUEUE_AVAIL_EVENT)?;
@@ -319,7 +320,7 @@ impl Pmem {
             common: VirtioCommon {
                 device_type: VirtioDeviceType::Pmem as u32,
                 queue_sizes: QUEUE_SIZES.to_vec(),
-                paused_sync: Some(Arc::new(Barrier::new(2))),
+                paused_sync: Some(Arc::new(PausedSync::default())),
                 avail_features,
                 acked_features,
                 min_queues: 1,

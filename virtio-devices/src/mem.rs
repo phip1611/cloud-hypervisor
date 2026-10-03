@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 use std::{io, result};
 
 use anyhow::anyhow;
@@ -42,6 +42,7 @@ use super::{
     VirtioDeviceType,
 };
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{GuestMemoryMmap, GuestRegionMmap, VirtioInterrupt, VirtioInterruptType};
 
@@ -675,7 +676,7 @@ impl MemEpollHandler {
     fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.queue_evt.as_raw_fd(), QUEUE_AVAIL_EVENT)?;
@@ -819,7 +820,7 @@ impl Mem {
                 device_type: VirtioDeviceType::Mem as u32,
                 avail_features,
                 acked_features,
-                paused_sync: Some(Arc::new(Barrier::new(2))),
+                paused_sync: Some(Arc::new(PausedSync::default())),
                 queue_sizes: QUEUE_SIZES.to_vec(),
                 min_queues: 1,
                 paused: Arc::new(AtomicBool::new(paused)),

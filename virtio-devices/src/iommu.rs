@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::{io, result};
 
 use anyhow::anyhow;
@@ -31,6 +31,7 @@ use super::{
     VirtioDeviceType,
 };
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{DmaRemapping, GuestMemoryMmap, VirtioInterrupt, VirtioInterruptType};
 
@@ -918,7 +919,7 @@ impl IommuEpollHandler {
     fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.request_queue_evt.as_raw_fd(), REQUEST_Q_EVENT)?;
@@ -1235,7 +1236,7 @@ impl Iommu {
                     queue_sizes: QUEUE_SIZES.to_vec(),
                     avail_features,
                     acked_features,
-                    paused_sync: Some(Arc::new(Barrier::new(2))),
+                    paused_sync: Some(Arc::new(PausedSync::default())),
                     min_queues: NUM_QUEUES as u16,
                     paused: Arc::new(AtomicBool::new(paused)),
                     ..Default::default()

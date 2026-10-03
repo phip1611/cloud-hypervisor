@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::num::Wrapping;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Barrier};
 use std::{cmp, io, result, thread};
 
 use anyhow::anyhow;
@@ -25,7 +25,7 @@ use vm_migration::{MigratableError, Pausable};
 use vm_virtio::{AccessPlatform, VirtioDeviceType};
 use vmm_sys_util::eventfd::EventFd;
 
-use crate::epoll_helper::EpollHelperError;
+use crate::epoll_helper::{EpollHelperError, PausedSync};
 use crate::seccomp_filters::Thread;
 use crate::thread_helper::spawn_virtio_thread;
 use crate::{
@@ -248,6 +248,11 @@ impl WorkerThreads {
         self.kill_evt.write(1)
     }
 
+    /// Number of workers that have not exited.
+    fn live(&self) -> usize {
+        self.threads.iter().filter(|t| !t.is_finished()).count()
+    }
+
     /// Unpark every worker so threads parked while paused resume their loop.
     fn unpark(&self) {
         for t in &self.threads {
@@ -278,7 +283,7 @@ pub struct VirtioCommon {
     pub interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
     pub pause_evt: Option<EventFd>,
     pub paused: Arc<AtomicBool>,
-    pub paused_sync: Option<Arc<Barrier>>,
+    pub paused_sync: Option<Arc<PausedSync>>,
     pub workers: Option<WorkerThreads>,
     pub queue_sizes: Vec<u16>,
     pub queue_evts: Vec<(u16, EventFd)>,
@@ -478,7 +483,14 @@ impl Pausable for VirtioCommon {
             // eventfd is Some(), as this means the virtio device has been
             // activated. One specific case where the device can be paused
             // while it hasn't been yet activated is snapshot/restore.
-            self.paused_sync.as_ref().unwrap().wait();
+            // Workers that exited on an error are not waited for.
+            self.paused_sync
+                .as_ref()
+                .unwrap()
+                .wait_parked(|| self.workers.as_ref().map_or(0, WorkerThreads::live));
+
+            // Every worker saw the event.
+            let _ = pause_evt.read();
         }
 
         Ok(())
@@ -516,13 +528,15 @@ impl Pausable for VirtioCommon {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration;
 
     use virtio_queue::QueueT;
     use vmm_sys_util::eventfd::EFD_NONBLOCK;
 
     use super::*;
+    use crate::epoll_helper::{EpollHelper, EpollHelperHandler};
 
     #[derive(Default)]
     struct RecordingInterrupt {
@@ -574,6 +588,120 @@ mod tests {
             ..common
         };
         (common, kill_evt_clone)
+    }
+
+    struct NoopHandler;
+    impl EpollHelperHandler for NoopHandler {
+        fn handle_event(
+            &mut self,
+            _: &mut EpollHelper,
+            _: &epoll::Event,
+        ) -> Result<(), EpollHelperError> {
+            Ok(())
+        }
+    }
+
+    /// Activated VirtioCommon without workers.
+    fn make_activated_common() -> VirtioCommon {
+        let queues = vec![(
+            0,
+            Queue::new(256).unwrap(),
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+        )];
+        let mut common = VirtioCommon {
+            paused_sync: Some(Arc::new(PausedSync::default())),
+            ..Default::default()
+        };
+        common.activate(&queues, Arc::new(NoopInterrupt)).unwrap();
+        common
+    }
+
+    /// Spawns a worker that runs `f` and then an epoll loop without events.
+    fn spawn_epoll_worker(common: &mut VirtioCommon, f: impl FnOnce() + Send + 'static) {
+        let (kill_evt, pause_evt) = common.dup_eventfds().unwrap();
+        let paused = Arc::clone(&common.paused);
+        let paused_sync = Arc::clone(common.paused_sync.as_ref().unwrap());
+        common
+            .spawn_worker(
+                "test",
+                &SeccompAction::Allow,
+                Thread::VirtioBlock,
+                &EventFd::new(EFD_NONBLOCK).unwrap(),
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(NoopInterrupt),
+                move || {
+                    f();
+                    EpollHelper::new(&kill_evt, &pause_evt)?.run(
+                        &paused,
+                        &paused_sync,
+                        &mut NoopHandler,
+                    )
+                },
+            )
+            .unwrap();
+    }
+
+    /// Runs `f` on its own thread and fails if it does not return in time.
+    fn run_with_timeout(
+        mut common: VirtioCommon,
+        f: impl FnOnce(&mut VirtioCommon) + Send + 'static,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            f(&mut common);
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(30))
+            .expect("pause handshake should not hang");
+    }
+
+    #[test]
+    fn pause_does_not_wait_for_exited_worker() {
+        let mut common = make_activated_common();
+        common
+            .spawn_worker(
+                "test",
+                &SeccompAction::Allow,
+                Thread::VirtioBlock,
+                &EventFd::new(EFD_NONBLOCK).unwrap(),
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(NoopInterrupt),
+                || Err(EpollHelperError::HandleEvent(anyhow!("worker error"))),
+            )
+            .unwrap();
+        spawn_epoll_worker(&mut common, || {});
+
+        run_with_timeout(common, |common| {
+            common.pause().unwrap();
+            common.resume().unwrap();
+        });
+    }
+
+    #[test]
+    fn pause_waits_for_worker_that_has_not_entered_its_loop() {
+        let mut common = make_activated_common();
+        // The worker finds the device paused before it ever polls.
+        spawn_epoll_worker(&mut common, || thread::sleep(Duration::from_millis(100)));
+
+        run_with_timeout(common, |common| {
+            common.pause().unwrap();
+            common.resume().unwrap();
+        });
+    }
+
+    #[test]
+    fn pause_resume_cycles_do_not_lose_the_acknowledgement() {
+        let mut common = make_activated_common();
+        for _ in 0..4 {
+            spawn_epoll_worker(&mut common, || {});
+        }
+
+        run_with_timeout(common, |common| {
+            for _ in 0..2000 {
+                common.pause().unwrap();
+                common.resume().unwrap();
+            }
+        });
     }
 
     #[test]

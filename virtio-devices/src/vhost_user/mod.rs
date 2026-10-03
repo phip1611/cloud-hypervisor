@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 use std::{io, result};
 
 use anyhow::anyhow;
@@ -29,6 +29,7 @@ use vm_migration::{MigratableError, Pausable, Snapshot};
 use vmm_sys_util::eventfd::EventFd;
 use vu_common_ctrl::VhostUserHandle;
 
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{
     ActivateError, EPOLL_HELPER_EVENT_LAST, EpollHelper, EpollHelperError, EpollHelperHandler,
@@ -270,7 +271,7 @@ impl<S: VhostUserFrontendReqHandler> VhostUserEpollHandler<S> {
     pub fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event_custom(

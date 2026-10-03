@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 use std::{cmp, io, result};
 
 use anyhow::anyhow;
@@ -32,6 +32,7 @@ use super::{
     VirtioDeviceType, VirtioInterruptType,
 };
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{GuestMemoryMmap, VirtioInterrupt};
 
@@ -324,7 +325,7 @@ impl ConsoleEpollHandler {
     fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.input_queue_evt.as_raw_fd(), INPUT_QUEUE_EVENT)?;
@@ -701,7 +702,7 @@ impl Console {
                     queue_sizes: QUEUE_SIZES.to_vec(),
                     avail_features,
                     acked_features,
-                    paused_sync: Some(Arc::new(Barrier::new(2))),
+                    paused_sync: Some(Arc::new(PausedSync::default())),
                     min_queues: NUM_QUEUES as u16,
                     paused: Arc::new(AtomicBool::new(paused)),
                     ..Default::default()

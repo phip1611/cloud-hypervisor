@@ -11,7 +11,7 @@
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Barrier, RwLock};
+use std::sync::{Arc, RwLock};
 use std::{fs, io, result};
 
 use anyhow::anyhow;
@@ -27,6 +27,8 @@ use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottabl
 use vm_virtio::AccessPlatform;
 use vmm_sys_util::eventfd::EventFd;
 
+use super::{VsockBackend, VsockPacket};
+use crate::device::ActivationContext;
 /// This is the `VirtioDevice` implementation for our vsock device. It handles the virtio-level
 /// device logic: feature negotiation, device configuration, and device activation.
 /// The run-time device logic (i.e. event-driven data handling) is implemented by
@@ -46,8 +48,7 @@ use vmm_sys_util::eventfd::EventFd;
 /// - an event queue FD; and
 /// - a backend FD.
 ///
-use super::{VsockBackend, VsockPacket};
-use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{
     ActivateResult, EPOLL_HELPER_EVENT_LAST, EpollHelper, EpollHelperError, EpollHelperHandler,
@@ -210,7 +211,7 @@ where
     fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.queue_evts[0].as_raw_fd(), RX_QUEUE_EVENT)?;
@@ -398,7 +399,7 @@ where
                 device_type: VirtioDeviceType::Vsock as u32,
                 avail_features,
                 acked_features,
-                paused_sync: Some(Arc::new(Barrier::new(2))),
+                paused_sync: Some(Arc::new(PausedSync::default())),
                 queue_sizes: QUEUE_SIZES.to_vec(),
                 min_queues: NUM_QUEUES as u16,
                 paused: Arc::new(AtomicBool::new(paused)),

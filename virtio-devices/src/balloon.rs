@@ -19,7 +19,7 @@ use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{cmp, mem, result};
 
@@ -44,6 +44,7 @@ use zerocopy::little_endian::{U16 as Le16, U64 as Le64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{
     ActivateResult, EPOLL_HELPER_EVENT_LAST, EpollHelper, EpollHelperError, EpollHelperHandler,
@@ -677,7 +678,7 @@ impl BalloonEpollHandler {
     fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.inflate_queue_evt.as_raw_fd(), INFLATE_QUEUE_EVENT)?;
@@ -882,7 +883,7 @@ impl Balloon {
                 device_type: VirtioDeviceType::Balloon as u32,
                 avail_features,
                 acked_features,
-                paused_sync: Some(Arc::new(Barrier::new(2))),
+                paused_sync: Some(Arc::new(PausedSync::default())),
                 queue_sizes,
                 min_queues: MIN_NUM_QUEUES as u16,
                 paused: Arc::new(AtomicBool::new(paused)),

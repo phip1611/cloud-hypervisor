@@ -11,7 +11,7 @@ use std::io::{self, Read};
 use std::mem;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{ptr, result};
 
@@ -33,6 +33,7 @@ use super::{
     VirtioCommon, VirtioDevice, VirtioDeviceType,
 };
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{GuestMemoryMmap, VirtioInterrupt, VirtioInterruptType};
 
@@ -129,7 +130,7 @@ impl WatchdogEpollHandler {
     fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.queue_evt.as_raw_fd(), QUEUE_AVAIL_EVENT)?;
@@ -250,7 +251,7 @@ impl Watchdog {
             common: VirtioCommon {
                 device_type: VirtioDeviceType::Watchdog as u32,
                 queue_sizes: QUEUE_SIZES.to_vec(),
-                paused_sync: Some(Arc::new(Barrier::new(2))),
+                paused_sync: Some(Arc::new(PausedSync::default())),
                 avail_features,
                 acked_features,
                 min_queues: 1,
