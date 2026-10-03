@@ -1210,6 +1210,8 @@ impl CpuManager {
         let vcpu_kill = Arc::clone(&vcpu_states[usize::try_from(vcpu_id).unwrap()].kill);
         let vcpu_run_interrupted =
             Arc::clone(&vcpu_states[usize::try_from(vcpu_id).unwrap()].vcpu_run_interrupted);
+        // Drop the ACK left behind by a previous thread of this vCPU.
+        vcpu_run_interrupted.store(false, Ordering::SeqCst);
         let panic_vcpu_run_interrupted = Arc::clone(&vcpu_run_interrupted);
         let vcpu_paused = Arc::clone(&vcpu_states[usize::try_from(vcpu_id).unwrap()].paused);
 
@@ -1387,13 +1389,16 @@ impl CpuManager {
                             }
 
                             if vcpus_kick_signalled.load(Ordering::SeqCst) {
-                                vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                // A vCPU handles a kick only once.
+                                let _acked = vcpu_run_interrupted.swap(true, Ordering::SeqCst);
                                 #[cfg(target_arch = "x86_64")]
-                                match vcpu.lock().as_ref().unwrap().vcpu.nmi() {
-                                    Ok(()) => {},
-                                    Err(e) => {
-                                        error!("Error when inject nmi {e}");
-                                        break;
+                                if !_acked {
+                                    match vcpu.lock().as_ref().unwrap().vcpu.nmi() {
+                                        Ok(()) => {},
+                                        Err(e) => {
+                                            error!("Error when inject nmi {e}");
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -2387,11 +2392,25 @@ impl CpuManager {
     }
 
     pub(crate) fn nmi(&mut self) -> Result<()> {
-        self.vcpus_kick_signalled.store(true, Ordering::SeqCst);
-        self.signal_vcpus()?;
-        self.vcpus_kick_signalled.store(false, Ordering::SeqCst);
+        // Parked vCPUs cannot handle the kick and must keep their pause ACK.
+        if self.vcpus_pause_signalled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
 
-        Ok(())
+        // Kicked vCPUs keep running, so their ACK is only valid for one kick.
+        let clear_acks = |vcpu_states: &Mutex<Vec<VcpuState>>| {
+            for state in vcpu_states.lock().unwrap().iter() {
+                state.vcpu_run_interrupted.store(false, Ordering::SeqCst);
+            }
+        };
+
+        clear_acks(&self.vcpu_states);
+        self.vcpus_kick_signalled.store(true, Ordering::SeqCst);
+        let res = self.signal_vcpus();
+        self.vcpus_kick_signalled.store(false, Ordering::SeqCst);
+        clear_acks(&self.vcpu_states);
+
+        res
     }
 }
 
