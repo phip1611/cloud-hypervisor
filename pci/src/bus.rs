@@ -403,16 +403,21 @@ impl PciConfigMmio {
             })
     }
 
-    fn config_space_write(&mut self, config_address: u32, offset: u64, data: &[u8]) {
+    fn config_space_write(
+        &mut self,
+        config_address: u32,
+        offset: u64,
+        data: &[u8],
+    ) -> Option<Arc<Barrier>> {
         if offset as usize + data.len() > 4 {
-            return;
+            return None;
         }
 
         let (bus, device, _function, register) = parse_mmio_config_address(config_address);
 
         // Only support one bus.
         if bus != 0 {
-            return;
+            return None;
         }
 
         let pci_bus = self.pci_bus.lock().unwrap();
@@ -420,10 +425,14 @@ impl PciConfigMmio {
             let mut device = d.lock().unwrap();
 
             // Update the register value
-            let (bar_reprogram, _) = device.write_config_register(register, offset, data);
+            let (bar_reprogram, ret) = device.write_config_register(register, offset, data);
 
             // Move the device's BAR if needed
             pci_bus.apply_bar_reprogramming(device.deref_mut(), &bar_reprogram);
+
+            ret
+        } else {
+            None
         }
     }
 }
@@ -450,9 +459,7 @@ impl BusDevice for PciConfigMmio {
         if offset > u64::from(u32::MAX) {
             return None;
         }
-        self.config_space_write(offset as u32, offset % 4, data);
-
-        None
+        self.config_space_write(offset as u32, offset % 4, data)
     }
 }
 
@@ -534,6 +541,53 @@ mod tests {
 
     fn setup_bus_without_host_bridge() -> PciBus {
         PciBus::new(None, Arc::new(MockDeviceRelocation {}))
+    }
+
+    /// Device whose config writes hand back a barrier, like a virtio device
+    /// that queued its activation.
+    struct BarrierDevice;
+
+    impl PciDevice for BarrierDevice {
+        fn write_config_register(
+            &mut self,
+            _reg_idx: usize,
+            _offset: u64,
+            _data: &[u8],
+        ) -> (Vec<BarReprogrammingParams>, Option<Arc<Barrier>>) {
+            (Vec::new(), Some(Arc::new(Barrier::new(2))))
+        }
+
+        fn read_config_register(&mut self, _reg_idx: usize) -> u32 {
+            0
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+
+        fn id(&self) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn config_write_returns_device_barrier() {
+        const DEVICE: u8 = 1;
+        const REGISTER: u32 = 0x10;
+
+        let mut bus = setup_bus();
+        bus.add_device(DEVICE, Arc::new(Mutex::new(BarrierDevice)))
+            .unwrap();
+        let pci_bus = Arc::new(Mutex::new(bus));
+
+        let mut config_io = PciConfigIo::new(Arc::clone(&pci_bus));
+        let address = 0x8000_0000u32 | (u32::from(DEVICE) << 11) | (REGISTER << 2);
+        config_io.write(0, 0, &address.to_le_bytes());
+        assert!(config_io.write(0, 4, &[0; 4]).is_some());
+
+        let mut config_mmio = PciConfigMmio::new(pci_bus);
+        let offset = (u64::from(DEVICE) << 15) | (u64::from(REGISTER) << 2);
+        assert!(config_mmio.write(0, offset, &[0; 4]).is_some());
     }
 
     #[test]
