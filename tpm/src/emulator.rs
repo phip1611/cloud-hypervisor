@@ -86,6 +86,8 @@ pub struct Emulator {
     caps: PtmCap, /* capabilities of the TPM */
     control_socket: SocketDev,
     data_fd: RawFd,
+    // A command was sent whose response was not received (yet).
+    response_pending: bool,
     established_bit_cached: bool,
     established_bit: bool,
 }
@@ -114,6 +116,7 @@ impl Emulator {
             caps: 0,
             control_socket: socket,
             data_fd: -1,
+            response_pending: false,
             established_bit_cached: false,
             established_bit: false,
         };
@@ -388,6 +391,21 @@ impl Emulator {
         let mut len = size_of::<sockaddr_storage>() as socklen_t;
         let isselftest = is_selftest(&cmd.buffer[0..cmd.input_len]);
 
+        // A late response would otherwise be taken for the response to `cmd`.
+        if self.response_pending {
+            let mut stale = [0u8; TPM_CRB_BUFFER_MAX];
+            // SAFETY: FFI call and the return value of the unsafe method is checked
+            let ret =
+                unsafe { libc::recv(self.data_fd, stale.as_mut_ptr().cast(), stale.len(), 0) };
+            if ret == -1 {
+                return Err(Error::SendReceive(anyhow!(
+                    "Response to previous tpm command is still outstanding. Error Code {:?}",
+                    io::Error::last_os_error()
+                )));
+            }
+            self.response_pending = false;
+        }
+
         debug!(
             "Send cmd: {:02X?}  of len {:?} on data_ioc ",
             cmd.buffer, cmd.input_len
@@ -417,6 +435,7 @@ impl Emulator {
                 )));
             }
         }
+        self.response_pending = true;
 
         let output_len;
         // SAFETY: FFI calls and return value from unsafe method is checked
@@ -437,6 +456,7 @@ impl Emulator {
             }
             output_len = ret as usize;
         }
+        self.response_pending = false;
         debug!(
             "response = {:02X?} len = {:?} selftest = {:?}",
             cmd.buffer, output_len, isselftest
@@ -551,7 +571,57 @@ impl Drop for Emulator {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::os::unix::io::IntoRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::Duration;
+
     use super::*;
+
+    #[test]
+    fn test_late_response_is_not_taken_for_next_command() {
+        let (data, mut swtpm) = UnixStream::pair().unwrap();
+        data.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut emulator = Emulator {
+            caps: 0,
+            control_socket: SocketDev::new(),
+            data_fd: data.into_raw_fd(),
+            response_pending: false,
+            established_bit_cached: false,
+            established_bit: false,
+        };
+        let mut deliver = |input: &[u8; 4]| {
+            let mut buffer = *input;
+            let mut cmd = BackendCmd {
+                buffer: &mut buffer,
+                input_len: input.len(),
+            };
+            emulator.deliver_request(&mut cmd).map(|()| buffer)
+        };
+
+        let mut buf = [0u8; 16];
+
+        // The response to the first command arrives after the receive timeout.
+        deliver(b"cmd1").unwrap_err();
+        assert_eq!(swtpm.read(&mut buf).unwrap(), 4);
+        swtpm.write_all(b"rsp1").unwrap();
+
+        let peer = thread::spawn(move || {
+            assert_eq!(swtpm.read(&mut buf).unwrap(), 4);
+            swtpm.write_all(b"rsp2").unwrap();
+            swtpm
+        });
+        assert_eq!(&deliver(b"cmd2").unwrap(), b"rsp2");
+        let mut swtpm = peer.join().unwrap();
+
+        // No command is sent while a response is outstanding.
+        deliver(b"cmd3").unwrap_err();
+        deliver(b"cmd4").unwrap_err();
+        let n = swtpm.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"cmd3");
+    }
 
     #[test]
     fn test_startup_response_accepts_success_and_initialized() {
