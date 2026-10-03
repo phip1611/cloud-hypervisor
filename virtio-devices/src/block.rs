@@ -1085,13 +1085,17 @@ impl Block {
 
         let nsectors = new_size / SECTOR_SIZE;
 
+        // A device that is already paused must stay paused.
+        let was_paused = self.common.paused.load(Ordering::SeqCst);
         self.common.pause().map_err(Error::PauseVcpus)?;
 
         self.disk_nsectors.store(nsectors, Ordering::SeqCst);
         self.config.capacity = nsectors;
         self.state().disk_nsectors = nsectors;
 
-        self.common.resume().map_err(Error::ResumeVcpus)?;
+        if !was_paused {
+            self.common.resume().map_err(Error::ResumeVcpus)?;
+        }
 
         self.common
             .trigger_interrupt(VirtioInterruptType::Config)
@@ -1416,5 +1420,43 @@ mod tests {
         handler.process_queue_submit().unwrap();
 
         assert_eq!(vq.used.idx.get(), 1);
+    }
+
+    #[test]
+    fn resize_keeps_paused_device_paused() {
+        use block::formats::raw::{RawBackend, RawDisk};
+        use vmm_sys_util::tempfile::TempFile;
+
+        let file = TempFile::new().unwrap();
+        file.as_file().set_len(1 << 20).unwrap();
+        let disk = RawDisk::new(file.as_file().try_clone().unwrap(), RawBackend::Sync, false);
+        let mut block = Block::new(
+            "disk".to_string(),
+            Box::new(disk),
+            file.as_path().to_path_buf(),
+            false,
+            false,
+            1,
+            128,
+            None,
+            SeccompAction::Allow,
+            None,
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            None,
+            BTreeMap::new(),
+            false,
+            LockGranularityChoice::default(),
+            None,
+        )
+        .unwrap();
+
+        block.resize(2 << 20).unwrap();
+        assert!(!block.common.paused.load(Ordering::SeqCst));
+
+        block.pause().unwrap();
+        block.resize(4 << 20).unwrap();
+        assert!(block.common.paused.load(Ordering::SeqCst));
+        let capacity = block.config.capacity;
+        assert_eq!(capacity, (4 << 20) / SECTOR_SIZE);
     }
 }
