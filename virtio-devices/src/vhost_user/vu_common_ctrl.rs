@@ -406,6 +406,13 @@ impl VhostUserHandle {
         kill_evt: &EventFd,
         mut initialize: impl FnMut(&mut Self) -> Result<()>,
     ) -> Result<Self> {
+        #[repr(u64)]
+        enum ConnectEvent {
+            Timer = 0,
+            Kill = 1,
+            Listener = 2,
+        }
+
         if server {
             if unlink_socket {
                 fs::remove_file(socket_path).map_err(Error::RemoveSocketPath)?;
@@ -413,7 +420,37 @@ impl VhostUserHandle {
 
             info!("Binding vhost-user listener...");
             let listener = UnixListener::bind(socket_path).map_err(Error::BindSocket)?;
+
+            // accept() can't observe kill_evt, so wait with epoll first.
+            let epoll = Epoll::new().map_err(Error::EpollCreate)?;
+            epoll
+                .ctl(
+                    ControlOperation::Add,
+                    listener.as_raw_fd(),
+                    EpollEvent::new(EventSet::IN, ConnectEvent::Listener as u64),
+                )
+                .map_err(Error::EpollCtl)?;
+            epoll
+                .ctl(
+                    ControlOperation::Add,
+                    kill_evt.as_raw_fd(),
+                    EpollEvent::new(EventSet::IN, ConnectEvent::Kill as u64),
+                )
+                .map_err(Error::EpollCtl)?;
+
             info!("Waiting for incoming vhost-user connection...");
+            let mut events = [EpollEvent::default(); 1];
+            loop {
+                match epoll.wait(-1, &mut events) {
+                    Ok(_) => break,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(Error::EpollWait(e)),
+                }
+            }
+            if events[0].data() == ConnectEvent::Kill as u64 {
+                info!("Aborting vhost-user accept for socket {socket_path}: kill event received");
+                return Err(Error::ConnectKilled);
+            }
             let (stream, _) = listener.accept().map_err(Error::AcceptConnection)?;
 
             let mut vhost_user = Self {
@@ -441,12 +478,6 @@ impl VhostUserHandle {
         } else {
             const RETRY_INTERVAL: Duration = Duration::from_millis(100);
             const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
-
-            #[repr(u64)]
-            enum ConnectEvent {
-                Timer = 0,
-                Kill = 1,
-            }
 
             let mut retry_timer = TimerFd::new().map_err(|e| Error::TimerFdCreate(e.into()))?;
             retry_timer
