@@ -129,8 +129,8 @@ pub struct VirtioPciCommonConfig {
     pub driver_status: Arc<AtomicU8>,
     pub config_generation: Arc<AtomicU8>,
     /// Set when a Config interrupt fires. Cleared on the next read of
-    /// the device specific configuration region, which also bumps
-    /// config_generation.
+    /// the device specific configuration region or of config_generation,
+    /// which also bumps config_generation.
     pub config_changed: Arc<AtomicBool>,
     pub device_feature_select: u32,
     pub driver_feature_select: u32,
@@ -154,9 +154,8 @@ impl VirtioPciCommonConfig {
         }
     }
 
-    /// If a Config interrupt has fired since the last device specific
-    /// configuration read, increment config_generation and clear the
-    /// pending flag.
+    /// If a Config interrupt has fired since the last call, increment
+    /// config_generation and clear the pending flag.
     pub fn consume_config_change(&self) {
         if self.config_changed.swap(false, Ordering::AcqRel) {
             // Wrap at u8 max is intentional per the virtio spec.
@@ -235,7 +234,11 @@ impl VirtioPciCommonConfig {
         // The driver is only allowed to do aligned, properly sized access.
         match offset {
             0x14 => self.driver_status.load(Ordering::Acquire),
-            0x15 => self.config_generation.load(Ordering::Acquire),
+            0x15 => {
+                // A change may have been signalled after the last config read.
+                self.consume_config_change();
+                self.config_generation.load(Ordering::Acquire)
+            }
             _ => {
                 warn!("invalid virtio config byte read: 0x{offset:x}");
                 0
@@ -665,6 +668,20 @@ mod tests {
         assert_eq!(regs.config_generation.load(Ordering::Acquire), 0x11);
         regs.consume_config_change();
         assert_eq!(regs.config_generation.load(Ordering::Acquire), 0x11);
+    }
+
+    #[test]
+    fn generation_read_consumes_config_change() {
+        let mut regs = make_regs(0x10);
+        let mut generation = [0];
+        regs.config_changed.store(true, Ordering::Release);
+
+        regs.read(0x15, &mut generation, &[]);
+        assert_eq!(generation[0], 0x11);
+        assert!(!regs.config_changed.load(Ordering::Acquire));
+
+        regs.read(0x15, &mut generation, &[]);
+        assert_eq!(generation[0], 0x11);
     }
 
     #[test]

@@ -1191,8 +1191,9 @@ impl PciDevice for VirtioPciDevice {
             o if (DEVICE_CONFIG_BAR_OFFSET..DEVICE_CONFIG_BAR_OFFSET + DEVICE_CONFIG_SIZE)
                 .contains(&o) =>
             {
-                self.common_config.consume_config_change();
                 let device = self.device.lock().unwrap();
+                // Under the lock, so an update that just completed is not missed.
+                self.common_config.consume_config_change();
                 device.read_config(o - DEVICE_CONFIG_BAR_OFFSET, data);
             }
             o if (NOTIFICATION_BAR_OFFSET..NOTIFICATION_BAR_OFFSET + NOTIFICATION_SIZE)
