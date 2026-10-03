@@ -410,8 +410,9 @@ impl RateLimiter {
                     // order to enforce the bandwidth limit we need to prevent
                     // further calls to the rate limiter for
                     // `ratio * refill_time` milliseconds.
+                    // A zero duration would disarm the timer and block forever.
                     guard.activate_timer(
-                        Duration::from_millis((ratio * refill_time as f64) as u64),
+                        Duration::from_millis(((ratio * refill_time as f64) as u64).max(1)),
                         &self.timer_active,
                     );
                     true
@@ -745,6 +746,19 @@ pub(crate) mod tests {
         assert!(!l.is_blocked());
         // try and succeed on another 100 bytes this time
         assert!(l.consume(100, TokenType::Bytes));
+    }
+
+    #[test]
+    fn test_rate_limiter_small_overconsumption_unblocks() {
+        // Borrowing 1 byte from a 1000 bytes/100ms bucket takes 0.1 ms to
+        // refill, which must not be rounded down to a disarmed timer.
+        let l = RateLimiter::new(1000, 0, 100, 0, 0, 0).unwrap();
+
+        assert!(l.consume(1001, TokenType::Bytes));
+        assert!(l.is_blocked());
+        thread::sleep(Duration::from_millis(50));
+        l.event_handler().unwrap();
+        assert!(!l.is_blocked());
     }
 
     #[test]
