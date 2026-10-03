@@ -886,6 +886,7 @@ mod tests {
     use vmm_sys_util::tempdir::TempDir;
 
     use super::*;
+    use crate::{VirtioDevice, VirtioDeviceType};
 
     fn read_request(stream: &mut UnixStream, expected_request: FrontendReq) {
         let mut header = [0u8; 12];
@@ -992,5 +993,50 @@ mod tests {
         .unwrap();
 
         backend.join().unwrap();
+    }
+
+    #[test]
+    fn generic_config_access_survives_lost_backend() {
+        let temp_dir = TempDir::new_with_prefix("/tmp/vhost-user-generic-").unwrap();
+        let socket_path = temp_dir.as_path().join("backend.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let backend = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream, FrontendReq::SET_OWNER);
+            read_request(&mut stream, FrontendReq::GET_FEATURES);
+            write_reply(
+                &mut stream,
+                FrontendReq::GET_FEATURES,
+                VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits(),
+            );
+            read_request(&mut stream, FrontendReq::GET_PROTOCOL_FEATURES);
+            write_reply(
+                &mut stream,
+                FrontendReq::GET_PROTOCOL_FEATURES,
+                VhostUserProtocolFeatures::CONFIG.bits(),
+            );
+            stream
+        });
+
+        let mut device = GenericVhostUser::new(
+            "test".to_string(),
+            socket_path.to_str().unwrap(),
+            vec![64],
+            VirtioDeviceType::Unknown as u32,
+            None,
+            SeccompAction::Allow,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            false,
+            None,
+        )
+        .unwrap();
+
+        // The backend goes away.
+        drop(backend.join().unwrap());
+
+        let mut data = [0u8; 4];
+        device.read_config(0, &mut data);
+        assert_eq!(data, [0xff; 4]);
+        device.write_config(0, &data);
     }
 }

@@ -255,7 +255,13 @@ impl VirtioDevice for GenericVhostUser {
             )
             .map(|(_, config)| data.copy_from_slice(&config))
         {
-            panic!("Failed getting generic vhost-user configuration: {e}");
+            error!(
+                "Failed getting generic vhost-user configuration for socket {} at offset \
+0x{offset:x} with length {}: {e:?}",
+                self.vu_common.socket_path,
+                data.len()
+            );
+            data.fill(0xFF);
         }
     }
 
@@ -279,7 +285,12 @@ impl VirtioDevice for GenericVhostUser {
                 data,
             )
         {
-            panic!("Failed setting generic vhost-user configuration: {e}");
+            error!(
+                "Failed setting generic vhost-user configuration for socket {} at offset \
+0x{offset:x} with length {}: {e:?}",
+                self.vu_common.socket_path,
+                data.len()
+            );
         }
     }
 
