@@ -666,6 +666,7 @@ impl VhostUserCommon {
                 "Skipping add memory region on disconnected dev with socket: {}",
                 self.socket_path
             );
+            return Ok(());
         }
 
         if let Err(e) = self.add_memory_region_internal(region) {
@@ -883,10 +884,11 @@ mod tests {
     use std::time::Duration;
 
     use vhost::vhost_user::message::{FrontendReq, VhostUserHeaderFlag};
+    use vm_memory::GuestAddress;
     use vmm_sys_util::tempdir::TempDir;
 
     use super::*;
-    use crate::{VirtioDevice, VirtioDeviceType};
+    use crate::{MmapRegion, VirtioDevice, VirtioDeviceType};
 
     fn read_request(stream: &mut UnixStream, expected_request: FrontendReq) {
         let mut header = [0u8; 12];
@@ -905,6 +907,33 @@ mod tests {
         reply.extend_from_slice(&8u32.to_ne_bytes());
         reply.extend_from_slice(&value.to_ne_bytes());
         stream.write_all(&reply).unwrap();
+    }
+
+    // Connects a handle to a fake backend that offers the given features.
+    fn connect_handle(features: u64) -> (VhostUserHandle, UnixStream) {
+        let temp_dir = TempDir::new_with_prefix("/tmp/vhost-user-handle-").unwrap();
+        let socket_path = temp_dir.as_path().join("backend.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let backend = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream, FrontendReq::SET_OWNER);
+            read_request(&mut stream, FrontendReq::GET_FEATURES);
+            write_reply(&mut stream, FrontendReq::GET_FEATURES, features);
+            stream
+        });
+
+        let kill_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let vu = VhostUserHandle::connect_vhost_user(
+            false,
+            socket_path.to_str().unwrap(),
+            1,
+            false,
+            &kill_evt,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        (vu, backend.join().unwrap())
     }
 
     #[test]
@@ -1038,5 +1067,21 @@ mod tests {
         device.read_config(0, &mut data);
         assert_eq!(data, [0xff; 4]);
         device.write_config(0, &data);
+    }
+
+    #[test]
+    fn add_memory_region_skips_disconnected_device() {
+        let (vu, _backend) = connect_handle(0);
+        let mut common = VhostUserCommon {
+            vu: Some(Arc::new(Mutex::new(vu))),
+            acked_protocol_features: VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS.bits(),
+            ..Default::default()
+        };
+        common.disconnected.store(true, Ordering::Relaxed);
+
+        // Sending this region would fail, as it has no backing file.
+        let region = MmapRegion::new(0x1000).unwrap();
+        let region = Arc::new(GuestRegionMmap::new(region, GuestAddress(0)).unwrap());
+        common.add_memory_region(&region).unwrap();
     }
 }
