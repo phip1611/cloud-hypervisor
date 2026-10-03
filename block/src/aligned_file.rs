@@ -6,6 +6,7 @@ use std::fs::{File, Metadata};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::FileExt;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::{Arc, Mutex};
 use std::{io, slice};
 
 use vmm_sys_util::file_traits::FileSync;
@@ -44,6 +45,8 @@ fn iovecs_are_aligned(alignment: usize, iovecs: &[libc::iovec], offset: u64) -> 
 pub struct AlignedFile {
     file: File,
     alignment: usize,
+    // Shared by all clones to serialize writes that cover a block only partly.
+    partial_write_lock: Arc<Mutex<()>>,
 }
 
 impl AlignedFile {
@@ -54,7 +57,11 @@ impl AlignedFile {
         } else {
             0
         };
-        AlignedFile { file, alignment }
+        AlignedFile {
+            file,
+            alignment,
+            partial_write_lock: Arc::default(),
+        }
     }
 
     pub fn alignment(&self) -> usize {
@@ -73,6 +80,7 @@ impl AlignedFile {
         Ok(AlignedFile {
             file: self.file.try_clone()?,
             alignment: self.alignment,
+            partial_write_lock: Arc::clone(&self.partial_write_lock),
         })
     }
 
@@ -110,7 +118,11 @@ impl AlignedFile {
     /// tests to force the bounce/RMW path without a real O_DIRECT fd.
     #[cfg(test)]
     pub fn with_alignment(file: File, alignment: usize) -> Self {
-        AlignedFile { file, alignment }
+        AlignedFile {
+            file,
+            alignment,
+            partial_write_lock: Arc::default(),
+        }
     }
 
     /// Read `len` bytes at `offset` through an aligned bounce buffer.
@@ -134,6 +146,9 @@ impl AlignedFile {
         gather: impl FnOnce(&mut [u8]) -> io::Result<()>,
     ) -> io::Result<usize> {
         let mut abuf = AlignedBuffer::new(offset, len, self.alignment)?;
+        // The padding is written back, so it must not change in between.
+        let _guard = (!is_aligned(self.alignment, 0, len, offset))
+            .then(|| self.partial_write_lock.lock().unwrap());
         abuf.read_from(&self.file)?; // RMW: preserve head/tail padding
         gather(abuf.as_mut_slice())?;
         abuf.write_to(&self.file)?;
@@ -257,6 +272,9 @@ impl FileExt for AlignedFile {
 
 impl WriteZeroesAt for AlignedFile {
     fn write_zeroes_at(&mut self, offset: u64, length: usize) -> io::Result<usize> {
+        // Must not zero the padding of a concurrent write_unaligned().
+        let _guard = (!is_aligned(self.alignment, 0, length, offset))
+            .then(|| self.partial_write_lock.lock().unwrap());
         self.file.write_zeroes_at(offset, length)
     }
 }
@@ -305,6 +323,9 @@ impl AsFd for AlignedFile {
 mod tests {
     use std::io::Write;
     use std::os::unix::fs::FileExt;
+    use std::sync::{Barrier, mpsc};
+    use std::thread;
+    use std::time::Duration;
 
     use vmm_sys_util::tempfile::TempFile;
 
@@ -319,7 +340,7 @@ mod tests {
     }
 
     fn forced(file: File, alignment: usize) -> AlignedFile {
-        AlignedFile { file, alignment }
+        AlignedFile::with_alignment(file, alignment)
     }
 
     #[test]
@@ -495,6 +516,43 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn partial_block_write_keeps_concurrent_neighbor_writes() {
+        let tf = pattern_file(4096);
+        let af = forced(tf.as_file().try_clone().unwrap(), 4096);
+        let mut neighbor = af.try_clone().unwrap();
+        let barrier = Barrier::new(2);
+        let (done_tx, done_rx) = mpsc::channel();
+
+        thread::scope(|s| {
+            s.spawn(|| {
+                af.write_unaligned(0, 512, |buf| {
+                    // Pause between the read and the write of the block.
+                    barrier.wait();
+                    barrier.wait();
+                    buf.fill(0xaa);
+                    Ok(())
+                })
+                .unwrap();
+            });
+            barrier.wait();
+            s.spawn(|| {
+                neighbor.write_zeroes_at(1024, 512).unwrap();
+                neighbor.write_all_at(&[0xbb; 512], 512).unwrap();
+                done_tx.send(()).unwrap();
+            });
+            // Unserialized, the neighbor completes now and its data is lost.
+            let _ = done_rx.recv_timeout(Duration::from_millis(100));
+            barrier.wait();
+        });
+
+        let mut block = [0u8; 1536];
+        tf.as_file().read_exact_at(&mut block, 0).unwrap();
+        assert_eq!(block[..512], [0xaa; 512]);
+        assert_eq!(block[512..1024], [0xbb; 512]);
+        assert_eq!(block[1024..], [0; 512]);
     }
 
     /// Build an iovec over `buf`, which must outlive the iovec.
