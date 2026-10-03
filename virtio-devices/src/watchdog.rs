@@ -167,9 +167,15 @@ impl EpollHelperHandler for WatchdogEpollHandler {
                 // When reading from the timerfd you get 8 bytes indicating
                 // the number of times this event has elapsed since the last read.
                 let mut buf = vec![0; 8];
-                self.timer.read_exact(&mut buf).map_err(|e| {
-                    EpollHelperError::HandleEvent(anyhow!("Error reading from timer fd: {e:}"))
-                })?;
+                if let Err(e) = self.timer.read_exact(&mut buf) {
+                    // The timer was disarmed after epoll reported it.
+                    if e.kind() == io::ErrorKind::WouldBlock {
+                        return Ok(());
+                    }
+                    return Err(EpollHelperError::HandleEvent(anyhow!(
+                        "Error reading from timer fd: {e:}"
+                    )));
+                }
 
                 if let Some(last_ping_time) = self.last_ping_time.lock().unwrap().as_ref() {
                     let now = Instant::now();
@@ -296,7 +302,7 @@ impl Watchdog {
 
 fn timerfd_create() -> Result<RawFd, io::Error> {
     // SAFETY: FFI call, trivially safe
-    let res = unsafe { libc::timerfd_create(libc::CLOCK_MONOTONIC, 0) };
+    let res = unsafe { libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_NONBLOCK) };
     if res < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -463,3 +469,48 @@ impl Snapshottable for Watchdog {
 
 impl Transportable for Watchdog {}
 impl Migratable for Watchdog {}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use vm_memory::GuestAddress;
+
+    use super::*;
+    use crate::vsock::tests::NoopVirtioInterrupt;
+
+    #[test]
+    fn test_event_of_disarmed_timer_is_ignored() {
+        // SAFETY: timerfd_create() returned a valid fd
+        let timer = unsafe { File::from_raw_fd(timerfd_create().unwrap()) };
+        // SAFETY: FFI call on a valid fd
+        let flags = unsafe { libc::fcntl(timer.as_raw_fd(), libc::F_GETFL) };
+        // Otherwise, the read of the disarmed timer below would block forever.
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+
+        let evt = || EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        // An expired timer would request a reset for this overdue ping.
+        let last_ping_time = Instant::now().checked_sub(Duration::from_secs(WATCHDOG_TIMEOUT + 1));
+        let mut handler = WatchdogEpollHandler {
+            mem: GuestMemoryAtomic::new(mem),
+            queue: Queue::new(QUEUE_SIZE).unwrap(),
+            interrupt_cb: Arc::new(NoopVirtioInterrupt {}),
+            queue_evt: evt(),
+            kill_evt: evt(),
+            pause_evt: evt(),
+            timer,
+            last_ping_time: Arc::new(Mutex::new(last_ping_time)),
+            reset_evt: evt(),
+        };
+        let mut helper = EpollHelper::new(&handler.kill_evt, &handler.pause_evt).unwrap();
+
+        // As if pause() disarmed the timer after epoll reported it.
+        let event = epoll::Event::new(epoll::Events::EPOLLIN, TIMER_EXPIRED_EVENT as u64);
+        handler.handle_event(&mut helper, &event).unwrap();
+        assert_eq!(
+            handler.reset_evt.read().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+}
