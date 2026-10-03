@@ -4875,21 +4875,25 @@ impl DeviceManager {
             .map_err(DeviceManagerError::UpdateMemoryForVfioPciDevice)?;
         }
 
-        // Take care of updating the memory for vfio-user devices.
-        {
-            let device_tree = self.device_tree.lock().unwrap();
-            for pci_device_node in device_tree.pci_devices() {
-                if let PciDeviceHandle::VfioUser(vfio_user_pci_device) = pci_device_node
-                    .pci_device_handle
-                    .as_ref()
-                    .ok_or(DeviceManagerError::MissingPciDevice)?
-                {
-                    vfio_user_pci_device
-                        .lock()
-                        .unwrap()
-                        .dma_map(new_region)
-                        .map_err(DeviceManagerError::UpdateMemoryForVfioUserPciDevice)?;
-                }
+        // Take care of updating the memory for vfio-user devices. Lock them
+        // without holding the device tree lock.
+        let pci_device_handles = self
+            .device_tree
+            .lock()
+            .unwrap()
+            .pci_devices()
+            .into_iter()
+            .map(|node| node.pci_device_handle.clone())
+            .collect::<Vec<_>>();
+        for pci_device_handle in pci_device_handles {
+            if let PciDeviceHandle::VfioUser(vfio_user_pci_device) =
+                pci_device_handle.ok_or(DeviceManagerError::MissingPciDevice)?
+            {
+                vfio_user_pci_device
+                    .lock()
+                    .unwrap()
+                    .dma_map(new_region)
+                    .map_err(DeviceManagerError::UpdateMemoryForVfioUserPciDevice)?;
             }
         }
 
@@ -4981,10 +4985,35 @@ impl DeviceManager {
         // VFIO device or a virtio-pci one.
         // In case the 'id' refers to a virtio device, we must find the PCI
         // node by looking at the parent.
-        let device_tree = self.device_tree.lock().unwrap();
-        let node = device_tree
-            .get(id)
-            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(id.to_string()))?;
+        // The device tree lock is dropped before the device gets locked.
+        let (pci_device_bdf, pci_device_handle) = {
+            let device_tree = self.device_tree.lock().unwrap();
+            let node = device_tree
+                .get(id)
+                .ok_or_else(|| DeviceManagerError::UnknownDeviceId(id.to_string()))?;
+
+            let pci_device_node = if node.pci_bdf.is_some() && node.pci_device_handle.is_some() {
+                node
+            } else {
+                let parent = node
+                    .parent
+                    .as_ref()
+                    .ok_or(DeviceManagerError::MissingNode)?;
+                device_tree
+                    .get(parent)
+                    .ok_or(DeviceManagerError::MissingNode)?
+            };
+
+            (
+                pci_device_node
+                    .pci_bdf
+                    .ok_or(DeviceManagerError::MissingDeviceNodePciBdf)?,
+                pci_device_node
+                    .pci_device_handle
+                    .clone()
+                    .ok_or(DeviceManagerError::MissingPciDevice)?,
+            )
+        };
 
         // Release advisory locks by dropping all references.
         // Linux automatically releases all locks of that file if the last open FD is closed.
@@ -5003,21 +5032,6 @@ impl DeviceManager {
             }
         }
 
-        let pci_device_node = if node.pci_bdf.is_some() && node.pci_device_handle.is_some() {
-            node
-        } else {
-            let parent = node
-                .parent
-                .as_ref()
-                .ok_or(DeviceManagerError::MissingNode)?;
-            device_tree
-                .get(parent)
-                .ok_or(DeviceManagerError::MissingNode)?
-        };
-
-        let pci_device_bdf: PciBdf = pci_device_node
-            .pci_bdf
-            .ok_or(DeviceManagerError::MissingDeviceNodePciBdf)?;
         let pci_segment_id = pci_device_bdf.segment();
 
         if !self.is_iommu_segment(pci_segment_id)
@@ -5029,11 +5043,7 @@ impl DeviceManager {
             return Err(DeviceManagerError::InvalidIommuRemove(pci_device_bdf));
         }
 
-        let pci_device_handle = pci_device_node
-            .pci_device_handle
-            .as_ref()
-            .ok_or(DeviceManagerError::MissingPciDevice)?;
-        if let PciDeviceHandle::Virtio(virtio_pci_device) = pci_device_handle {
+        if let PciDeviceHandle::Virtio(virtio_pci_device) = &pci_device_handle {
             let device_type = VirtioDeviceType::from(
                 virtio_pci_device
                     .lock()
@@ -5419,6 +5429,17 @@ impl DeviceManager {
             1 << bdf.device();
 
         Ok(PciDeviceInfo { id, bdf })
+    }
+
+    // Devices must be locked without holding the device tree lock: a vCPU
+    // relocating a BAR holds its device and then takes the device tree.
+    fn migratable_devices(&self) -> Vec<(String, Arc<Mutex<dyn Migratable>>)> {
+        self.device_tree
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, node)| Some((id.clone(), node.migratable.clone()?)))
+            .collect()
     }
 
     fn is_iommu_segment(&self, pci_segment_id: u16) -> bool {
@@ -6033,15 +6054,13 @@ fn create_s5_sleep_state(sink: &mut dyn acpi_tables::AmlSink) {
 
 impl Pausable for DeviceManager {
     fn pause(&mut self) -> result::Result<(), MigratableError> {
-        for (_, device_node) in self.device_tree.lock().unwrap().iter() {
-            if let Some(migratable) = &device_node.migratable {
-                match migratable.lock().unwrap().pause() {
-                    Ok(()) => {}
-                    Err(MigratableError::DeviceDisconnected(id)) => {
-                        warn!("Skipping pause for disconnected device {id}");
-                    }
-                    Err(e) => return Err(e),
+        for (_, migratable) in self.migratable_devices() {
+            match migratable.lock().unwrap().pause() {
+                Ok(()) => {}
+                Err(MigratableError::DeviceDisconnected(id)) => {
+                    warn!("Skipping pause for disconnected device {id}");
                 }
+                Err(e) => return Err(e),
             }
         }
         // On AArch64, the pause of device manager needs to trigger
@@ -6060,15 +6079,13 @@ impl Pausable for DeviceManager {
     }
 
     fn resume(&mut self) -> result::Result<(), MigratableError> {
-        for (_, device_node) in self.device_tree.lock().unwrap().iter() {
-            if let Some(migratable) = &device_node.migratable {
-                match migratable.lock().unwrap().resume() {
-                    Ok(()) => {}
-                    Err(MigratableError::DeviceDisconnected(id)) => {
-                        warn!("Skipping resume for disconnected device {id}");
-                    }
-                    Err(e) => return Err(e),
+        for (_, migratable) in self.migratable_devices() {
+            match migratable.lock().unwrap().resume() {
+                Ok(()) => {}
+                Err(MigratableError::DeviceDisconnected(id)) => {
+                    warn!("Skipping resume for disconnected device {id}");
                 }
+                Err(e) => return Err(e),
             }
         }
         Ok(())
@@ -6084,11 +6101,9 @@ impl Snapshottable for DeviceManager {
         let mut snapshot = Snapshot::from_data(SnapshotData::new_from_state(&self.state())?);
 
         // We aggregate all devices snapshots.
-        for (_, device_node) in self.device_tree.lock().unwrap().iter() {
-            if let Some(migratable) = &device_node.migratable {
-                let mut migratable = migratable.lock().unwrap();
-                snapshot.add_snapshot(migratable.id(), migratable.snapshot()?);
-            }
+        for (_, migratable) in self.migratable_devices() {
+            let mut migratable = migratable.lock().unwrap();
+            snapshot.add_snapshot(migratable.id(), migratable.snapshot()?);
         }
 
         Ok(snapshot)
@@ -6099,48 +6114,38 @@ impl Transportable for DeviceManager {}
 
 impl Migratable for DeviceManager {
     fn start_dirty_log(&mut self) -> result::Result<(), MigratableError> {
-        for (_, device_node) in self.device_tree.lock().unwrap().iter() {
-            if let Some(migratable) = &device_node.migratable {
-                migratable.lock().unwrap().start_dirty_log()?;
-            }
+        for (_, migratable) in self.migratable_devices() {
+            migratable.lock().unwrap().start_dirty_log()?;
         }
         Ok(())
     }
 
     fn stop_dirty_log(&mut self) -> result::Result<(), MigratableError> {
-        for (_, device_node) in self.device_tree.lock().unwrap().iter() {
-            if let Some(migratable) = &device_node.migratable {
-                migratable.lock().unwrap().stop_dirty_log()?;
-            }
+        for (_, migratable) in self.migratable_devices() {
+            migratable.lock().unwrap().stop_dirty_log()?;
         }
         Ok(())
     }
 
     fn dirty_log(&mut self) -> result::Result<MemoryRangeTable, MigratableError> {
         let mut table = MemoryRangeTable::default();
-        for (_, device_node) in self.device_tree.lock().unwrap().iter() {
-            if let Some(migratable) = &device_node.migratable {
-                table.extend(migratable.lock().unwrap().dirty_log()?);
-            }
+        for (_, migratable) in self.migratable_devices() {
+            table.extend(migratable.lock().unwrap().dirty_log()?);
         }
         Ok(table)
     }
 
     fn notify_started_migration(&mut self) -> result::Result<(), MigratableError> {
-        for (_, device_node) in self.device_tree.lock().unwrap().iter() {
-            if let Some(migratable) = &device_node.migratable {
-                migratable.lock().unwrap().notify_started_migration()?;
-            }
+        for (_, migratable) in self.migratable_devices() {
+            migratable.lock().unwrap().notify_started_migration()?;
         }
         Ok(())
     }
 
     fn notify_failed_migration(&mut self) -> result::Result<(), MigratableError> {
         let mut result = Ok(());
-        for (id, device_node) in self.device_tree.lock().unwrap().iter() {
-            if let Some(migratable) = &device_node.migratable
-                && let Err(e) = migratable.lock().unwrap().notify_failed_migration()
-            {
+        for (id, migratable) in self.migratable_devices() {
+            if let Err(e) = migratable.lock().unwrap().notify_failed_migration() {
                 warn!(
                     "Failed to abort migration for device {id}: {}",
                     flatten_error_chain_to_string(&e)
@@ -6152,10 +6157,8 @@ impl Migratable for DeviceManager {
     }
 
     fn notify_completed_migration(&mut self) -> result::Result<(), MigratableError> {
-        for (_, device_node) in self.device_tree.lock().unwrap().iter() {
-            if let Some(migratable) = &device_node.migratable {
-                migratable.lock().unwrap().notify_completed_migration()?;
-            }
+        for (_, migratable) in self.migratable_devices() {
+            migratable.lock().unwrap().notify_completed_migration()?;
         }
         Ok(())
     }
