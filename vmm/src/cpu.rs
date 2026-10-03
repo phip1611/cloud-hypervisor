@@ -808,6 +808,11 @@ impl VcpuState {
         self.handle.is_some()
     }
 
+    /// The thread left its run loop on its own and was not joined yet.
+    fn exited(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| h.is_finished())
+    }
+
     /// Sends a signal to the underlying thread.
     ///
     /// Please call [`Self::wait_until_signal_acknowledged`] afterward to block
@@ -836,7 +841,7 @@ impl VcpuState {
         if let Some(_handle) = self.handle.as_ref() {
             let mut count = 0;
             loop {
-                if self.vcpu_run_interrupted.load(Ordering::SeqCst) {
+                if self.vcpu_run_interrupted.load(Ordering::SeqCst) || self.exited() {
                     return Ok(());
                 }
                 // This is more effective than thread::yield_now() at
@@ -2784,8 +2789,8 @@ impl Pausable for CpuManager {
         // activated vCPU change their state to ensure they have parked.
         for state in self.vcpu_states.lock().unwrap().iter() {
             if state.active() {
-                // wait for vCPU to update state
-                while !state.paused.load(Ordering::SeqCst) {
+                // wait for vCPU to update state; an exited thread never parks
+                while !state.paused.load(Ordering::SeqCst) && !state.exited() {
                     // To avoid a priority inversion with the vCPU thread
                     thread::sleep(time::Duration::from_millis(1));
                 }
@@ -3453,6 +3458,25 @@ impl BusDevice for AcpiCpuHotplugController {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod vcpu_state_tests {
+    use super::*;
+
+    #[test]
+    fn exited_thread_acknowledges_signals() {
+        let state = VcpuState {
+            handle: Some(thread::spawn(|| {})),
+            ..Default::default()
+        };
+        while !state.exited() {
+            thread::yield_now();
+        }
+
+        // Must not wait for the 1s timeout.
+        state.wait_until_signal_acknowledged().unwrap();
     }
 }
 
