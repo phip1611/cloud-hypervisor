@@ -10,8 +10,9 @@
 
 use std::fs::File;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 use std::{io, result, thread};
 
 use log::debug;
@@ -19,8 +20,43 @@ use thiserror::Error;
 use vmm_sys_util::eventfd::EventFd;
 
 pub struct EpollHelper {
-    pause_evt: EventFd,
     epoll_file: File,
+}
+
+/// Lets a device wait until its workers have parked for a pause.
+#[derive(Default)]
+pub struct PausedSync {
+    parked: Mutex<usize>,
+    cond: Condvar,
+}
+
+impl PausedSync {
+    /// Parks the calling worker for as long as `paused` is set.
+    pub fn park(&self, paused: &AtomicBool) {
+        // Checked again after leaving: the next pause may already count on
+        // this worker being parked.
+        while paused.load(Ordering::SeqCst) {
+            *self.parked.lock().unwrap() += 1;
+            self.cond.notify_all();
+            // park() can return spuriously.
+            while paused.load(Ordering::SeqCst) {
+                thread::park();
+            }
+            *self.parked.lock().unwrap() -= 1;
+        }
+    }
+
+    /// Blocks until `workers()` workers are parked. The count is polled so
+    /// that workers exiting in the meantime are not waited for.
+    pub fn wait_parked(&self, workers: impl Fn() -> usize) {
+        let mut parked = self.parked.lock().unwrap();
+        while *parked < workers() {
+            (parked, _) = self
+                .cond
+                .wait_timeout(parked, Duration::from_millis(10))
+                .unwrap();
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -89,10 +125,7 @@ impl EpollHelper {
         // SAFETY: epoll_fd is a valid fd
         let epoll_file = unsafe { File::from_raw_fd(epoll_fd) };
 
-        let mut helper = Self {
-            pause_evt: pause_evt.try_clone().unwrap(),
-            epoll_file,
-        };
+        let mut helper = Self { epoll_file };
 
         helper.add_event(kill_evt.as_raw_fd(), EPOLL_HELPER_EVENT_KILL)?;
         helper.add_event(pause_evt.as_raw_fd(), EPOLL_HELPER_EVENT_PAUSE)?;
@@ -151,7 +184,7 @@ impl EpollHelper {
     pub fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
         handler: &mut dyn EpollHelperHandler,
     ) -> result::Result<(), EpollHelperError> {
         self.run_with_timeout(paused, paused_sync, handler, -1, false)
@@ -161,7 +194,7 @@ impl EpollHelper {
     pub fn run_with_timeout(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
         handler: &mut dyn EpollHelperHandler,
         timeout: i32,
         enable_event_list: bool,
@@ -173,9 +206,7 @@ impl EpollHelper {
         // to be in a paused state. This is helpful for the restore code path
         // as the device thread should not start processing anything before the
         // device has been resumed.
-        while paused.load(Ordering::SeqCst) {
-            thread::park();
-        }
+        paused_sync.park(paused);
 
         loop {
             let num_events =
@@ -218,21 +249,10 @@ impl EpollHelper {
                     EPOLL_HELPER_EVENT_PAUSE => {
                         debug!("PAUSE_EVENT received, pausing epoll loop");
 
-                        // Acknowledge the pause is effective by using the
-                        // paused_sync barrier.
-                        paused_sync.wait();
-
-                        // We loop here to handle spurious park() returns.
-                        // Until we have not resumed, the paused boolean will
-                        // be true.
-                        while paused.load(Ordering::SeqCst) {
-                            thread::park();
-                        }
-
-                        // Drain pause event after the device has been resumed.
-                        // This ensures the pause event has been seen by each
-                        // thread related to this virtio device.
-                        let _ = self.pause_evt.read();
+                        // The pause event only wakes the worker up. It is
+                        // drained by the pausing thread once all workers
+                        // have parked.
+                        paused_sync.park(paused);
                     }
                     _ => {
                         handler.handle_event(self, event)?;
@@ -248,7 +268,7 @@ impl EpollHelper {
     pub fn run_with_timeout(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
         handler: &mut dyn EpollHelperHandler,
         _timeout: i32,
         _enable_event_list: bool,
@@ -299,21 +319,10 @@ impl EpollHelper {
                     EPOLL_HELPER_EVENT_PAUSE => {
                         debug!("PAUSE_EVENT received, pausing epoll loop");
 
-                        // Acknowledge the pause is effective by using the
-                        // paused_sync barrier.
-                        paused_sync.wait();
-
-                        // We loop here to handle spurious park() returns.
-                        // Until we have not resumed, the paused boolean will
-                        // be true.
-                        while paused.load(Ordering::SeqCst) {
-                            thread::park();
-                        }
-
-                        // Drain pause event after the device has been resumed.
-                        // This ensures the pause event has been seen by each
-                        // thread related to this virtio device.
-                        let _ = self.pause_evt.read();
+                        // The pause event only wakes the worker up. It is
+                        // drained by the pausing thread once all workers
+                        // have parked.
+                        paused_sync.park(paused);
                     }
                     _ => {
                         handler.handle_event(self, event)?;

@@ -3,7 +3,7 @@
 
 use std::mem::offset_of;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 use std::{io, result};
 
 use block::VirtioBlockConfig;
@@ -27,6 +27,7 @@ use super::super::{ActivateResult, VirtioCommon, VirtioDevice, VirtioDeviceType}
 use super::vu_common_ctrl::{VhostUserConfig, VhostUserHandle};
 use super::{DEFAULT_VIRTIO_FEATURES, Error, Result};
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::vhost_user::{VhostUserCommon, VhostUserState};
 use crate::{GuestRegion, VIRTIO_F_ACCESS_PLATFORM, VirtioInterrupt, VirtioInterruptType};
@@ -212,7 +213,7 @@ impl Blk {
                     queue_sizes: vec![vu_cfg.queue_size; num_queues as usize],
                     avail_features,
                     acked_features,
-                    paused_sync: Some(Arc::new(Barrier::new(2))),
+                    paused_sync: Some(Arc::new(PausedSync::default())),
                     min_queues: DEFAULT_QUEUE_NUMBER,
                     paused: Arc::new(AtomicBool::new(paused)),
                     ..Default::default()

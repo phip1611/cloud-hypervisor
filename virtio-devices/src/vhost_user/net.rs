@@ -3,7 +3,7 @@
 
 use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 
 use log::{error, info};
 use net_util::{CtrlQueue, MacAddr, VirtioNetConfig};
@@ -28,6 +28,7 @@ use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::timerfd::TimerFd;
 
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::net::{AnnounceOps, AnnouncementState, Announcer, VirtioNetGuestAnnounceOps};
 use crate::seccomp_filters::Thread;
 use crate::vhost_user::vu_common_ctrl::{VhostUserConfig, VhostUserHandle};
@@ -273,7 +274,7 @@ impl Net {
                     queue_sizes: vec![vu_cfg.queue_size; num_queues as usize],
                     avail_features,
                     acked_features,
-                    paused_sync: Some(Arc::new(Barrier::new(2))),
+                    paused_sync: Some(Arc::new(PausedSync::default())),
                     min_queues: DEFAULT_QUEUE_NUMBER,
                     paused: Arc::new(AtomicBool::new(paused)),
                     ..Default::default()
@@ -418,10 +419,6 @@ impl VirtioDevice for Net {
             };
 
             let paused = Arc::clone(&self.vu_common.virtio_common.paused);
-            // Let's update the barrier as we need 1 for the control queue
-            // thread + 1 for the common vhost-user thread + 1 for the main
-            // thread signalling the pause.
-            self.vu_common.virtio_common.paused_sync = Some(Arc::new(Barrier::new(3)));
             let paused_sync = self.vu_common.virtio_common.paused_sync.clone();
 
             self.vu_common.virtio_common.spawn_worker(

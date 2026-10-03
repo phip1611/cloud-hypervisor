@@ -12,8 +12,8 @@ use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::result;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
@@ -44,6 +44,7 @@ use super::{
     VirtioDeviceType, VirtioInterruptType,
 };
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{GuestMemory, VirtioInterrupt};
 
@@ -86,7 +87,7 @@ impl NetCtrlEpollHandler {
     pub fn run_ctrl(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.queue_evt.as_raw_fd(), CTRL_QUEUE_EVENT)?;
@@ -325,7 +326,7 @@ impl NetEpollHandler {
     fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.queue_evt_pair.0.as_raw_fd(), RX_QUEUE_EVENT)?;
@@ -632,7 +633,7 @@ impl Net {
                 avail_features,
                 acked_features,
                 queue_sizes,
-                paused_sync: Some(Arc::new(Barrier::new((num_queues / 2) as usize + 1))),
+                paused_sync: Some(Arc::new(PausedSync::default())),
                 min_queues: 2,
                 paused: Arc::new(AtomicBool::new(paused)),
                 ..Default::default()
@@ -863,14 +864,10 @@ impl VirtioDevice for Net {
         let num_queues = u16::try_from(queues.len()).map_err(|_| ActivateError::BadActivate)?;
         let event_idx = self.common.feature_acked(VIRTIO_RING_F_EVENT_IDX.into());
 
-        // Recompute the barrier size from the queues that are actually activated.
         let has_ctrl_queue =
             self.common.feature_acked(VIRTIO_NET_F_CTRL_VQ.into()) && !num_queues.is_multiple_of(2);
         let ctrl_threads = if has_ctrl_queue { 1 } else { 0 };
         let qp_threads = (num_queues - ctrl_threads) / 2;
-        self.common.paused_sync = Some(Arc::new(Barrier::new(usize::from(
-            1 + qp_threads + ctrl_threads,
-        ))));
 
         // Only a queue pair with a worker drains its tap queue, so detach the
         // rest before the workers start.

@@ -16,8 +16,8 @@ use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 use std::{io, mem, result, thread};
 
@@ -52,6 +52,7 @@ use super::{
     VirtioInterruptType,
 };
 use crate::device::ActivationContext;
+use crate::epoll_helper::PausedSync;
 use crate::seccomp_filters::Thread;
 use crate::{GuestMemory, VirtioInterrupt};
 
@@ -684,7 +685,7 @@ impl BlockEpollHandler {
     fn run(
         &mut self,
         paused: &AtomicBool,
-        paused_sync: &Barrier,
+        paused_sync: &PausedSync,
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.queue_evt.as_raw_fd(), QUEUE_AVAIL_EVENT)?;
@@ -927,7 +928,7 @@ impl Block {
                 device_type: VirtioDeviceType::Block as u32,
                 avail_features,
                 acked_features,
-                paused_sync: Some(Arc::new(Barrier::new(num_queues as usize + 1))),
+                paused_sync: Some(Arc::new(PausedSync::default())),
                 queue_sizes: vec![queue_size; num_queues as usize],
                 min_queues: 1,
                 paused: Arc::new(AtomicBool::new(paused)),
@@ -1181,9 +1182,6 @@ impl VirtioDevice for Block {
             warn!("Guest did not acknowledge that device is read-only, acting as if it did!");
         }
         self.common.activate(&queues, Arc::clone(&interrupt_cb))?;
-
-        // Recompute the barrier size from the queues that are actually activated.
-        self.common.paused_sync = Some(Arc::new(Barrier::new(queues.len() + 1)));
 
         let writeback = self.is_writeback_enabled(self.config.writeback == 1);
         self.set_writeback_mode(writeback);
