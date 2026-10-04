@@ -2770,8 +2770,16 @@ impl Pausable for CpuManager {
         // Tell the vCPUs to pause themselves next time they exit
         self.vcpus_pause_signalled.store(true, Ordering::SeqCst);
 
-        self.signal_vcpus()
-            .map_err(|e| MigratableError::Pause(anyhow!("Error signalling vCPUs: {e}")))?;
+        if let Err(e) = self.signal_vcpus() {
+            // Let the vCPUs that already parked run again.
+            self.vcpus_pause_signalled.store(false, Ordering::SeqCst);
+            for state in self.vcpu_states.lock().unwrap().iter() {
+                state.unpark_thread();
+            }
+            return Err(MigratableError::Pause(anyhow!(
+                "Error signalling vCPUs: {e}"
+            )));
+        }
 
         // Notify all guests (including Hyper-V / Windows) that the clock was
         // paused.  KVM_KVMCLOCK_CTRL updates internal KVM state that affects
