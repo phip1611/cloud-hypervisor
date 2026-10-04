@@ -2298,14 +2298,22 @@ impl Vmm {
                     }
                     EpollDispatch::Reset => {
                         info!("VM reset event");
-                        // Consume the event.
-                        self.reset_evt.read().map_err(Error::EventFdRead)?;
+                        // Consume the event. It is stale if a reboot already
+                        // consumed it or the VM was shut down meanwhile.
+                        if self.reset_evt.read().is_err() || matches!(self.vm, VmOwnership::None) {
+                            continue;
+                        }
                         // TODO: Future follow-up must resolve lifecycle handling while migrating.
                         self.vm_reboot().map_err(Error::VmReboot)?;
                     }
                     EpollDispatch::GuestExit => {
                         info!("VM guest exit event");
-                        self.guest_exit_evt.read().map_err(Error::EventFdRead)?;
+                        // Stale if a reboot consumed it or the VM is gone.
+                        if self.guest_exit_evt.read().is_err()
+                            || matches!(self.vm, VmOwnership::None)
+                        {
+                            continue;
+                        }
                         // TODO: Future follow-up must resolve lifecycle handling while migrating.
                         if self.no_shutdown {
                             self.vm_shutdown().map_err(Error::VmShutdown)?;
@@ -2789,6 +2797,8 @@ impl RequestHandler for Vmm {
         if self.reset_evt.read().is_ok() {
             warn!("Spurious second reset event received. Ignoring.");
         }
+        // A guest exit of the old VM must not shut down the new one.
+        let _ = self.guest_exit_evt.read();
 
         self.console_info =
             Some(pre_create_console_devices(self).map_err(VmError::CreateConsoleDevices)?);
