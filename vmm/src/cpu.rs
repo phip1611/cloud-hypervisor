@@ -2851,8 +2851,11 @@ impl Pausable for CpuManager {
         // Step 2/2: wait for state ACK
         {
             for state in vcpu_states.iter() {
-                // wait for vCPU to update state
-                while state.paused.load(Ordering::SeqCst) {
+                // wait for vCPU to update state; a vCPU can request the next
+                // pause right away, e.g. after a single step
+                while state.paused.load(Ordering::SeqCst)
+                    && !self.vcpus_pause_signalled.load(Ordering::SeqCst)
+                {
                     // To avoid a priority inversion with the vCPU thread
                     thread::sleep(time::Duration::from_millis(1));
                 }
