@@ -43,6 +43,9 @@ use crate::{GuestMemoryMmap, VmMigrationConfig};
 /// receiver side.
 pub(crate) const MAX_MIGRATION_CONNECTIONS: u32 = 128;
 
+/// Timeout for each setup step of a new connection (TLS handshake, role).
+const CONNECTION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Transport-agnostic listener used to receive connections.
 #[derive(Debug)]
 pub(crate) enum ReceiveListener {
@@ -82,8 +85,20 @@ impl ReceiveListener {
                     .context("Failed to set socket options")
                     .map_err(MigratableError::MigrateReceive)?;
 
+                // Without a timeout, a silent peer blocks the handshake forever.
+                socket
+                    .set_read_timeout(Some(CONNECTION_SETUP_TIMEOUT))
+                    .and_then(|()| socket.set_write_timeout(Some(CONNECTION_SETUP_TIMEOUT)))
+                    .map_err(MigratableError::MigrateSocket)?;
+
                 // Not wrapped, so the caller can tell a failed handshake apart.
                 let stream = TlsStream::new_server(socket, config)?;
+
+                let socket = stream.tcp_stream();
+                socket
+                    .set_read_timeout(None)
+                    .and_then(|()| socket.set_write_timeout(None))
+                    .map_err(MigratableError::MigrateSocket)?;
 
                 Ok(SocketStream::Tls(Box::new(stream)))
             }
@@ -461,7 +476,7 @@ impl ReceiveAdditionalConnections {
         // Timeout the role header so one stalled peer cannot block the accept
         // thread from handling other connections.
         socket
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(CONNECTION_SETUP_TIMEOUT))
             .map_err(MigratableError::MigrateSocket)?;
 
         let role = match ConnectionRole::read_from(&mut socket) {
