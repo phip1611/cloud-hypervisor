@@ -1280,10 +1280,12 @@ impl CpuManager {
                                 }
                             }
                             CoreScheduling::Vm => {
-                                // First vCPU creates a cookie; all others share from it.
+                                // vCPU 0 creates a cookie; all others share from it.
+                                // It is never removed, so its TID stays valid for
+                                // hotplugged vCPUs.
                                 // SAFETY: gettid() is always safe to call.
                                 let my_tid = unsafe { libc::gettid() };
-                                if core_scheduling_group_leader
+                                if vcpu_id == 0 && core_scheduling_group_leader
                                     .compare_exchange(CoreSchedulingLeader::Initial as i32, CoreSchedulingLeader::Elected as i32, Ordering::AcqRel, Ordering::Acquire)
                                     .is_ok()
                                 {
