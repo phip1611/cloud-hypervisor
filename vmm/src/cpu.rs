@@ -821,9 +821,8 @@ impl VcpuState {
     /// If the thread is in KVM_RUN (or MSHV_RUN_VP or equivalent), this kicks
     /// the thread out of kernel space. If the thread is in user-space, the
     /// thread will just handle the event eventually. If the thread is in
-    /// user-space but about to enter kernel-space, the user-space signal
-    /// handler will make sure that the next kernel entry of the given
-    /// vCPU thread immediately exits to handle the event in user-space.
+    /// user-space but about to enter kernel-space, the signal is lost, which
+    /// is why [`Self::wait_until_signal_acknowledged`] retries.
     fn signal_thread(&self) {
         if let Some(handle) = self.handle.as_ref() {
             // SAFETY: FFI call with correct arguments
