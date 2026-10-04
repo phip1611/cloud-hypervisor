@@ -838,25 +838,24 @@ impl VcpuState {
     ///
     /// This is the counterpart of [`Self::signal_thread`].
     fn wait_until_signal_acknowledged(&self) -> Result<()> {
-        if let Some(_handle) = self.handle.as_ref() {
-            let mut count = 0;
-            loop {
-                if self.vcpu_run_interrupted.load(Ordering::SeqCst) || self.exited() {
-                    return Ok(());
-                }
-                // This is more effective than thread::yield_now() at
-                // avoiding a priority inversion with the vCPU thread
-                thread::sleep(time::Duration::from_millis(1));
-                count += 1;
-                if count >= 1000 {
-                    return Err(Error::SignalAcknowledgeTimeout);
-                } else if count % 10 == 0 {
-                    warn!("vCPU thread did not respond in {count}ms to signal - retrying");
-                    self.signal_thread();
-                }
+        let mut count = 0;
+        while !self.signal_acknowledged() {
+            // This is more effective than thread::yield_now() at
+            // avoiding a priority inversion with the vCPU thread
+            thread::sleep(time::Duration::from_millis(1));
+            count += 1;
+            if count >= 1000 {
+                return Err(Error::SignalAcknowledgeTimeout);
+            } else if count % 10 == 0 {
+                warn!("vCPU thread did not respond in {count}ms to signal - retrying");
+                self.signal_thread();
             }
         }
         Ok(())
+    }
+
+    fn signal_acknowledged(&self) -> bool {
+        !self.active() || self.exited() || self.vcpu_run_interrupted.load(Ordering::SeqCst)
     }
 
     fn join_thread(&mut self) -> Result<()> {
@@ -1678,8 +1677,18 @@ impl CpuManager {
             vcpu_states[cpu_id].signal_thread();
         }
         for cpu_id in 0..vcpu_count {
-            let vcpu_states = self.vcpu_states.lock().unwrap();
-            vcpu_states[cpu_id].wait_until_signal_acknowledged()?;
+            let mut count = 0;
+            // The lock is only taken for the check and the retry.
+            while !self.vcpu_states.lock().unwrap()[cpu_id].signal_acknowledged() {
+                thread::sleep(time::Duration::from_millis(1));
+                count += 1;
+                if count >= 1000 {
+                    return Err(Error::SignalAcknowledgeTimeout);
+                } else if count % 10 == 0 {
+                    warn!("vCPU thread did not respond in {count}ms to signal - retrying");
+                    self.vcpu_states.lock().unwrap()[cpu_id].signal_thread();
+                }
+            }
         }
 
         Ok(())
