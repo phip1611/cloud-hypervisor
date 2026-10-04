@@ -82,11 +82,10 @@ impl ReceiveListener {
                     .context("Failed to set socket options")
                     .map_err(MigratableError::MigrateReceive)?;
 
-                TlsStream::new_server(socket, config)
-                    .map(Box::new)
-                    .map(SocketStream::Tls)
-                    .context("Failed to accept TLS migration connection")
-                    .map_err(MigratableError::MigrateReceive)
+                // Not wrapped, so the caller can tell a failed handshake apart.
+                let stream = TlsStream::new_server(socket, config)?;
+
+                Ok(SocketStream::Tls(Box::new(stream)))
             }
         }
     }
@@ -417,7 +416,14 @@ impl ReceiveAdditionalConnections {
         seccomp_filter: &BpfProgram,
     ) -> Result<(), MigratableError> {
         loop {
-            let socket = listener.abortable_accept(kill_evt)?;
+            let socket = match listener.abortable_accept(kill_evt) {
+                // A failed TLS handshake only concerns that connection.
+                Err(e @ MigratableError::Tls(_)) => {
+                    warn!("Dropping connection: {}", flatten_error_chain_to_string(&e));
+                    continue;
+                }
+                result => result?,
+            };
             let Some(socket) = socket else {
                 return Ok(());
             };
