@@ -1399,7 +1399,10 @@ impl CpuManager {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
 
                                 vcpu_paused.store(true, Ordering::SeqCst);
-                                while vcpus_pause_signalled.load(Ordering::SeqCst) {
+                                // A vCPU that gets removed must not stay parked.
+                                while vcpus_pause_signalled.load(Ordering::SeqCst)
+                                    && !vcpu_kill.load(Ordering::SeqCst)
+                                {
                                     thread::park();
                                 }
                                 vcpu_paused.store(false, Ordering::SeqCst);
@@ -3377,6 +3380,8 @@ impl AcpiCpuHotplugController {
     fn remove_vcpu(cpu_id: u32, state: &mut VcpuState) -> Result<()> {
         info!("Removing vCPU: cpu_id = {cpu_id}");
         state.kill.store(true, Ordering::SeqCst);
+        // The thread can be parked for a pause that started meanwhile.
+        state.unpark_thread();
         state.signal_thread();
         state.wait_until_signal_acknowledged()?;
         state.join_thread()?;
