@@ -124,15 +124,18 @@ impl TxVirtio {
                 let mut guest_ranges: SmallVec<[(GuestAddress, usize); CHAIN_INLINE_DESCS]> =
                     SmallVec::new();
                 while let Some(desc) = next_desc {
+                    // Zero length descriptors are valid and carry no data
+                    if desc.len() == 0 {
+                        next_desc = desc_chain.next();
+                        continue;
+                    }
                     let desc_addr = desc
                         .addr()
                         .translate_gva(access_platform, desc.len() as usize)
                         .map_err(|e| {
                             NetQueuePairError::GuestMemory(vm_memory::GuestMemoryError::IOError(e))
                         })?;
-                    if !desc.is_write_only() && desc.len() > 0 {
-                        guest_ranges.push((desc_addr, desc.len() as usize));
-                    } else {
+                    if desc.is_write_only() {
                         error!(
                             "Invalid descriptor chain: address = 0x{:x} length = {} write_only = {}",
                             desc_addr.0,
@@ -141,6 +144,7 @@ impl TxVirtio {
                         );
                         return Err(NetQueuePairError::DescriptorChainInvalid);
                     }
+                    guest_ranges.push((desc_addr, desc.len() as usize));
                     next_desc = desc_chain.next();
                 }
                 // Copy the header out of the guest ranges because the guest
@@ -330,13 +334,18 @@ impl RxVirtio {
                 let mut next_desc = Some(desc);
 
                 while let Some(desc) = next_desc {
+                    // Zero length descriptors are valid and carry no data
+                    if desc.len() == 0 {
+                        next_desc = desc_chain.next();
+                        continue;
+                    }
                     let desc_addr = desc
                         .addr()
                         .translate_gva(access_platform, desc.len() as usize)
                         .map_err(|e| {
                             NetQueuePairError::GuestMemory(vm_memory::GuestMemoryError::IOError(e))
                         })?;
-                    if desc.is_write_only() && desc.len() > 0 {
+                    if desc.is_write_only() {
                         guest_ranges.push((desc_addr, desc.len() as usize));
                     } else {
                         error!(
@@ -728,6 +737,89 @@ mod tests {
             peer.recv(&mut buf).unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn tx_skips_zero_length_descriptors() {
+        const HDR: u64 = 0x10000;
+        const DATA: u64 = 0x20000;
+        const FRAME: usize = 64;
+
+        let mem =
+            GuestMemoryMmap::<AtomicBitmap>::from_ranges(&[(GuestAddress(0), 0x10_0000)]).unwrap();
+        // One TX chain with an empty descriptor between header and frame
+        let vq = MockSplitQueue::new(&mem, 16);
+        vq.add_desc_chains(
+            &[
+                RawDescriptor::from(Descriptor::new(
+                    HDR,
+                    vnet_hdr_len() as u32,
+                    VRING_DESC_F_NEXT as u16,
+                    1,
+                )),
+                RawDescriptor::from(Descriptor::new(DATA, 0, VRING_DESC_F_NEXT as u16, 2)),
+                RawDescriptor::from(Descriptor::new(DATA, FRAME as u32, 0, 0)),
+            ],
+            0,
+        )
+        .unwrap();
+        let mut queue: Queue = vq.create_queue().unwrap();
+        let (tap_end, peer) = UnixDatagram::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let tap = Tap::new_for_fuzzing(File::from(OwnedFd::from(tap_end)), "test");
+
+        TxVirtio::new(false)
+            .process_desc_chain(&mem, &tap, &mut queue, &mut None, None)
+            .expect("a zero length descriptor should not fail the chain");
+
+        assert_eq!(u16::from_le(vq.used().idx().load()), 1);
+        let mut buf = [0u8; 0x1000];
+        assert_eq!(peer.recv(&mut buf).unwrap(), vnet_hdr_len() + FRAME);
+    }
+
+    #[test]
+    fn rx_skips_zero_length_descriptors() {
+        const BUF0: u64 = 0x10000;
+        const BUF1: u64 = 0x20000;
+        const FRAME: usize = 100;
+
+        let mem =
+            GuestMemoryMmap::<AtomicBitmap>::from_ranges(&[(GuestAddress(0), 0x10_0000)]).unwrap();
+        // One RX chain with an empty descriptor between two buffers
+        let vq = MockSplitQueue::new(&mem, 16);
+        vq.add_desc_chains(
+            &[
+                RawDescriptor::from(Descriptor::new(
+                    BUF0,
+                    vnet_hdr_len() as u32,
+                    (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT) as u16,
+                    1,
+                )),
+                RawDescriptor::from(Descriptor::new(
+                    BUF1,
+                    0,
+                    (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT) as u16,
+                    2,
+                )),
+                RawDescriptor::from(Descriptor::new(BUF1, 0x1000, VRING_DESC_F_WRITE as u16, 0)),
+            ],
+            0,
+        )
+        .unwrap();
+        let mut queue: Queue = vq.create_queue().unwrap();
+        let tap = {
+            let (tx, rx) = UnixDatagram::pair().unwrap();
+            rx.set_nonblocking(true).unwrap();
+            tx.send(&[0xab; FRAME]).unwrap();
+            Tap::new_for_fuzzing(File::from(OwnedFd::from(rx)), "test")
+        };
+
+        RxVirtio::new()
+            .process_desc_chain(&mem, &tap, &mut queue, &mut None, None)
+            .expect("a zero length descriptor should not fail the chain");
+
+        let used = vq.used().ring().ref_at(0).unwrap().load();
+        assert_eq!((used.id(), used.len()), (0, FRAME as u32));
     }
 
     #[test]
