@@ -15,6 +15,8 @@ use virtio_bindings::virtio_net::{
     VIRTIO_NET_CTRL_RX_ALLMULTI, VIRTIO_NET_CTRL_RX_ALLUNI, VIRTIO_NET_CTRL_RX_NOBCAST,
     VIRTIO_NET_CTRL_RX_NOMULTI, VIRTIO_NET_CTRL_RX_NOUNI, VIRTIO_NET_CTRL_RX_PROMISC,
     VIRTIO_NET_CTRL_VLAN, VIRTIO_NET_CTRL_VLAN_ADD, VIRTIO_NET_CTRL_VLAN_DEL, VIRTIO_NET_ERR,
+    VIRTIO_NET_F_CTRL_GUEST_OFFLOADS, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_ECN,
+    VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_TSO6, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_MQ,
     VIRTIO_NET_OK,
 };
 use virtio_queue::{Queue, QueueT};
@@ -64,6 +66,14 @@ struct ControlHeader {
 // SAFETY: ControlHeader only contains a series of integers
 unsafe impl ByteValued for ControlHeader {}
 
+/// Offloads that VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET can enable, the ones
+/// virtio_features_to_tap_offload() translates.
+const GUEST_OFFLOADS: u64 = (1 << VIRTIO_NET_F_GUEST_CSUM)
+    | (1 << VIRTIO_NET_F_GUEST_TSO4)
+    | (1 << VIRTIO_NET_F_GUEST_TSO6)
+    | (1 << VIRTIO_NET_F_GUEST_ECN)
+    | (1 << VIRTIO_NET_F_GUEST_UFO);
+
 fn is_tolerated_ctrl_command(ctrl_hdr: ControlHeader) -> bool {
     match u32::from(ctrl_hdr.class) {
         VIRTIO_NET_CTRL_RX => matches!(
@@ -88,6 +98,7 @@ pub struct CtrlQueue {
     pub announce_pending: Arc<AtomicBool>,
     pub max_virtqueue_pairs: u16,
     pub curr_queue_pairs: Arc<AtomicU16>,
+    acked_features: u64,
 }
 
 impl CtrlQueue {
@@ -96,13 +107,19 @@ impl CtrlQueue {
         announce_pending: Arc<AtomicBool>,
         max_virtqueue_pairs: u16,
         curr_queue_pairs: Arc<AtomicU16>,
+        acked_features: u64,
     ) -> Self {
         CtrlQueue {
             taps,
             announce_pending,
             max_virtqueue_pairs,
             curr_queue_pairs,
+            acked_features,
         }
+    }
+
+    fn feature_acked(&self, feature: u32) -> bool {
+        self.acked_features & (1 << feature) != 0
     }
 
     pub fn process(
@@ -145,7 +162,10 @@ impl CtrlQueue {
                         .memory()
                         .read_obj::<u16>(data_desc_addr)
                         .map_err(Error::GuestMemory)?;
-                    let ok = if u32::from(ctrl_hdr.cmd) != VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET {
+                    let ok = if !self.feature_acked(VIRTIO_NET_F_MQ) {
+                        warn!("MQ command without VIRTIO_NET_F_MQ negotiated");
+                        false
+                    } else if u32::from(ctrl_hdr.cmd) != VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET {
                         warn!("Unsupported command: {}", ctrl_hdr.cmd);
                         false
                     } else if (queue_pairs < VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MIN as u16)
@@ -183,7 +203,12 @@ impl CtrlQueue {
                         .memory()
                         .read_obj::<u64>(data_desc_addr)
                         .map_err(Error::GuestMemory)?;
-                    let ok = if u32::from(ctrl_hdr.cmd) == VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET {
+                    let ok = if !self.feature_acked(VIRTIO_NET_F_CTRL_GUEST_OFFLOADS)
+                        || features & !(self.acked_features & GUEST_OFFLOADS) != 0
+                    {
+                        warn!("Guest offloads not negotiated: {features:#x}");
+                        false
+                    } else if u32::from(ctrl_hdr.cmd) == VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET {
                         let mut ok = true;
                         for tap in self.taps.iter_mut() {
                             info!("Reprogramming tap offload with features: {features}");
@@ -271,6 +296,8 @@ mod tests {
     use super::*;
     use crate::GuestMemoryMmap;
 
+    const MQ: u64 = 1 << VIRTIO_NET_F_MQ;
+
     #[test]
     fn test_process_announce_ack_without_data_descriptor() {
         // Build a minimal control virtqueue with one available request.
@@ -325,6 +352,7 @@ mod tests {
             Arc::clone(&announce_pending),
             1,
             Arc::new(AtomicU16::new(1)),
+            0,
         );
 
         ctrl_q.process(&mem, &mut queue, None).unwrap();
@@ -339,7 +367,11 @@ mod tests {
     /// Build a three-descriptor VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET request
     /// (readable header, readable le16 payload, writable status) and return the
     /// status byte the device wrote.
-    fn run_mq_vq_pairs_set(requested: u16, max_virtqueue_pairs: u16) -> (u8, u16) {
+    fn run_mq_vq_pairs_set(
+        requested: u16,
+        max_virtqueue_pairs: u16,
+        acked_features: u64,
+    ) -> (u8, u16) {
         const MEM_SIZE: usize = 0x20_0000;
         const QSIZE: u16 = 4;
         const QUEUE_ADDR: u64 = 0x0014_0000;
@@ -384,6 +416,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             max_virtqueue_pairs,
             Arc::clone(&curr_queue_pairs),
+            acked_features,
         );
         ctrl_q.process(&mem, &mut queue, None).unwrap();
 
@@ -397,8 +430,8 @@ mod tests {
     fn test_process_mq_vq_pairs_set_within_max_is_accepted() {
         // The spec permits any value up to max_virtqueue_pairs, so a request
         // for exactly that many pairs must be acknowledged.
-        assert_eq!(run_mq_vq_pairs_set(4, 4), (VIRTIO_NET_OK as u8, 4));
-        assert_eq!(run_mq_vq_pairs_set(1, 4), (VIRTIO_NET_OK as u8, 1));
+        assert_eq!(run_mq_vq_pairs_set(4, 4, MQ), (VIRTIO_NET_OK as u8, 4));
+        assert_eq!(run_mq_vq_pairs_set(1, 4, MQ), (VIRTIO_NET_OK as u8, 1));
     }
 
     #[test]
@@ -406,8 +439,91 @@ mod tests {
         // "The driver MUST NOT request a virtqueue_pairs of 0 or greater than
         // max_virtqueue_pairs in the device configuration space."
         // Such a request must not be acknowledged as successful.
-        assert_eq!(run_mq_vq_pairs_set(5, 4), (VIRTIO_NET_ERR as u8, 1));
-        assert_eq!(run_mq_vq_pairs_set(0, 4), (VIRTIO_NET_ERR as u8, 1));
+        assert_eq!(run_mq_vq_pairs_set(5, 4, MQ), (VIRTIO_NET_ERR as u8, 1));
+        assert_eq!(run_mq_vq_pairs_set(0, 4, MQ), (VIRTIO_NET_ERR as u8, 1));
+    }
+
+    #[test]
+    fn test_process_mq_vq_pairs_set_without_mq_is_rejected() {
+        // The MQ command class requires VIRTIO_NET_F_MQ.
+        assert_eq!(run_mq_vq_pairs_set(2, 4, 0), (VIRTIO_NET_ERR as u8, 1));
+    }
+
+    /// Build a three-descriptor VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET request
+    /// for the given offloads and return the status byte the device wrote.
+    fn run_guest_offloads_set(offloads: u64, acked_features: u64) -> u8 {
+        const MEM_SIZE: usize = 0x20_0000;
+        const QSIZE: u16 = 4;
+        const QUEUE_ADDR: u64 = 0x0018_0000;
+        const HEADER_ADDR: u64 = 0x0019_0000;
+        const DATA_ADDR: u64 = 0x0019_1000;
+        const STATUS_ADDR: u64 = 0x0019_2000;
+
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM_SIZE)]).unwrap();
+        let guest_q = GuestQ::new(GuestAddress(QUEUE_ADDR), &mem, QSIZE);
+        let mut queue = guest_q.create_queue();
+
+        guest_q.dtable[0].set(
+            HEADER_ADDR,
+            size_of::<ControlHeader>() as u32,
+            VRING_DESC_F_NEXT.try_into().unwrap(),
+            1,
+        );
+        guest_q.dtable[1].set(
+            DATA_ADDR,
+            size_of::<u64>() as u32,
+            VRING_DESC_F_NEXT.try_into().unwrap(),
+            2,
+        );
+        guest_q.dtable[2].set(STATUS_ADDR, 1, VRING_DESC_F_WRITE.try_into().unwrap(), 0);
+        guest_q.avail.ring[0].set(0);
+        guest_q.avail.idx.set(1);
+
+        mem.write_obj(
+            ControlHeader {
+                class: VIRTIO_NET_CTRL_GUEST_OFFLOADS as u8,
+                cmd: VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET as u8,
+            },
+            GuestAddress(HEADER_ADDR),
+        )
+        .unwrap();
+        mem.write_obj(offloads, GuestAddress(DATA_ADDR)).unwrap();
+        mem.write_obj(0xff_u8, GuestAddress(STATUS_ADDR)).unwrap();
+
+        // Without taps, an accepted request has nothing to reprogram
+        let mut ctrl_q = CtrlQueue::new(
+            Vec::new(),
+            Arc::new(AtomicBool::new(false)),
+            1,
+            Arc::new(AtomicU16::new(1)),
+            acked_features,
+        );
+        ctrl_q.process(&mem, &mut queue, None).unwrap();
+
+        mem.read_obj::<u8>(GuestAddress(STATUS_ADDR)).unwrap()
+    }
+
+    #[test]
+    fn test_process_guest_offloads_set_requires_negotiated_offloads() {
+        let ctrl = 1 << VIRTIO_NET_F_CTRL_GUEST_OFFLOADS;
+        let csum = 1 << VIRTIO_NET_F_GUEST_CSUM;
+        let tso4 = 1 << VIRTIO_NET_F_GUEST_TSO4;
+
+        assert_eq!(
+            run_guest_offloads_set(csum, ctrl | csum),
+            VIRTIO_NET_OK as u8
+        );
+        assert_eq!(run_guest_offloads_set(0, ctrl), VIRTIO_NET_OK as u8);
+        // The command class requires VIRTIO_NET_F_CTRL_GUEST_OFFLOADS
+        assert_eq!(run_guest_offloads_set(0, csum), VIRTIO_NET_ERR as u8);
+        // Only negotiated guest offloads may be enabled
+        assert_eq!(run_guest_offloads_set(csum, ctrl), VIRTIO_NET_ERR as u8);
+        assert_eq!(
+            run_guest_offloads_set(csum | tso4, ctrl | csum),
+            VIRTIO_NET_ERR as u8
+        );
+        // Bits that are not guest offloads are refused as well
+        assert_eq!(run_guest_offloads_set(ctrl, ctrl), VIRTIO_NET_ERR as u8);
     }
 
     #[test]
@@ -446,6 +562,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             1,
             Arc::new(AtomicU16::new(1)),
+            1 << VIRTIO_NET_F_CTRL_GUEST_OFFLOADS,
         );
 
         assert!(matches!(
@@ -506,6 +623,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             1,
             Arc::new(AtomicU16::new(1)),
+            MQ,
         );
         let result = ctrl_q.process(&mem, &mut queue, None);
 
