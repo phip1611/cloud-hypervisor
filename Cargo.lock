@@ -1787,7 +1787,6 @@ dependencies = [
  "libc",
  "log",
  "serde",
- "serde_json",
  "thiserror",
  "vfio-bindings",
  "vfio-ioctls",

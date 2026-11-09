@@ -3767,10 +3767,10 @@ impl Migratable for Vm {
     }
 
     fn dirty_log(&mut self) -> result::Result<MemoryRangeTable, MigratableError> {
-        // memory manager reports by far the most dirty ranges: extend into it
-        let mut table = self.memory_manager.lock().unwrap().dirty_log()?;
-        table.extend(self.device_manager.lock().unwrap().dirty_log()?);
-        Ok(table)
+        Ok(MemoryRangeTable::new_from_tables(vec![
+            self.memory_manager.lock().unwrap().dirty_log()?,
+            self.device_manager.lock().unwrap().dirty_log()?,
+        ]))
     }
 
     fn notify_started_migration(&mut self) -> result::Result<(), MigratableError> {

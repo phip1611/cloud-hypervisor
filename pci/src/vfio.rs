@@ -2000,16 +2000,16 @@ impl VfioCommon {
         let Some(page_size) = self.dma_logging_page_size else {
             return Ok(MemoryRangeTable::default());
         };
-        let mut table = MemoryRangeTable::default();
+        let mut tables = Vec::with_capacity(ranges.len());
         for range in ranges {
-            let range_table = self
+            let table = self
                 .vfio_wrapper
                 .report_dma_logging(*range, page_size)
                 .context("VFIO report_dma_logging failed")
                 .map_err(MigratableError::DirtyLog)?;
-            table.extend(range_table);
+            tables.push(table);
         }
-        Ok(table)
+        Ok(MemoryRangeTable::new_from_tables(tables))
     }
 }
 
@@ -3347,7 +3347,7 @@ mod tests {
             length: page_size * 64,
         };
         let table = mock.report_dma_logging(range, page_size).unwrap();
-        let ranges = table.ranges();
+        let ranges = table.regions();
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].gpa, 0x1_0000_0000);
         assert_eq!(ranges[0].length, page_size * 2);
