@@ -232,6 +232,7 @@ fn ranges_overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> bool {
     a_start < b_end && b_start < a_end
 }
 
+#[derive(Debug)]
 pub(super) struct RegionInfo {
     pub bat_entry: RegionTableEntry,
     pub mdr_entry: RegionTableEntry,
@@ -454,6 +455,7 @@ fn calculate_checksum(buffer: &mut [u8], csum_offset: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::os::unix::fs::FileExt;
 
     use vmm_sys_util::tempfile::TempFile;
@@ -564,8 +566,9 @@ mod tests {
 
         let af = AlignedFile::new(f, false);
         let res = RegionInfo::new(&af, region_start, 2);
-        assert!(
-            matches!(res, Err(VhdxHeaderError::RegionOverlap)),
+        assert_matches!(
+            res,
+            Err(VhdxHeaderError::RegionOverlap),
             "expected RegionOverlap for an overlapping region table"
         );
     }
@@ -586,8 +589,9 @@ mod tests {
 
         let af = AlignedFile::new(f, false);
         let res = RegionInfo::new(&af, region_start, 1);
-        assert!(
-            matches!(res, Err(VhdxHeaderError::RegionEntryOverflow(..))),
+        assert_matches!(
+            res,
+            Err(VhdxHeaderError::RegionEntryOverflow(..)),
             "expected RegionEntryOverflow for a wrapping region entry"
         );
     }

@@ -153,6 +153,7 @@ impl disk_file::AsyncDiskFile for VhdDisk {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::fs::File;
     use std::io::{Seek, SeekFrom, Write};
 
@@ -233,10 +234,10 @@ mod tests {
             FixedVhdSync::new(AlignedFile::new(file.try_clone().unwrap(), false), 0x1000);
         let op = AsyncIoOperation::read_to_vec(0x800, OwnedIoBuffer::from_vec(vec![0; 0x900]), 1);
 
-        assert!(matches!(
+        assert_matches!(
             sync_io.submit_data_operation(op),
             Err(AsyncIoError::ReadVectored(_))
-        ));
+        );
     }
 
     #[test]
@@ -248,10 +249,10 @@ mod tests {
         let op =
             AsyncIoOperation::write_from_vec(0x800, OwnedIoBuffer::from_vec(vec![0; 0x900]), 1);
 
-        assert!(matches!(
+        assert_matches!(
             sync_io.submit_data_operation(op),
             Err(AsyncIoError::WriteVectored(_))
-        ));
+        );
     }
 
     #[test]
@@ -284,10 +285,10 @@ mod tests {
         let mut async_io = FixedVhdAsync::new(file.try_clone().unwrap(), false, 8, 0x1000).unwrap();
         let op = AsyncIoOperation::read_to_vec(0x800, OwnedIoBuffer::from_vec(vec![0; 0x900]), 1);
 
-        assert!(matches!(
+        assert_matches!(
             async_io.submit_batch_requests(vec![op]),
             Err(AsyncIoError::ReadVectored(_))
-        ));
+        );
     }
 
     #[cfg(feature = "io_uring")]
@@ -298,10 +299,10 @@ mod tests {
         let mut async_io = FixedVhdAsync::new(file.try_clone().unwrap(), false, 8, 0x1000).unwrap();
         let op = AsyncIoOperation::read_to_vec(0x800, OwnedIoBuffer::from_vec(vec![0; 0x900]), 1);
 
-        assert!(matches!(
+        assert_matches!(
             async_io.submit_data_operation(op),
             Err(AsyncIoError::ReadVectored(_))
-        ));
+        );
     }
 
     #[test]
