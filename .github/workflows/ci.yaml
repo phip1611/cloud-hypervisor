@@ -692,7 +692,7 @@ jobs:
     # format() because `${{ matrix.runner }}-16` is not valid in runs-on.
     runs-on: ${{ format('{0}-16', matrix.runner) }}
     steps: *integration-x86-64-steps
-# Disabled for maintenance  
+# Disabled for maintenance
 #  integration-arm64:
 #    name: integration-arm64
 #    needs: [preflight]
