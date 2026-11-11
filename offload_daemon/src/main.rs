@@ -620,6 +620,8 @@ fn create_memfd_with_contents(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use clap::CommandFactory;
     use serde_json::json;
 
@@ -682,18 +684,18 @@ mod tests {
     #[test]
     fn test_parse_guest_ram_mappings_missing_array() {
         let value = json!({});
-        assert!(matches!(
+        assert_matches!(
             parse_guest_ram_mappings(&value),
             Err(Error::MissingField("guest_ram_mappings"))
-        ));
+        );
     }
 
     #[test]
     fn test_parse_guest_ram_mappings_missing_field() {
         let value = json!({ "guest_ram_mappings": [{ "slot": 0, "gpa": 0u64, "size": 4096u64 }] });
-        assert!(matches!(
+        assert_matches!(
             parse_guest_ram_mappings(&value),
             Err(Error::MissingField("file_offset"))
-        ));
+        );
     }
 }
