@@ -33,6 +33,7 @@ use crate::{
     VIRTIO_F_RING_INDIRECT_DESC,
 };
 
+#[derive(Debug)]
 pub enum VirtioInterruptType {
     Config,
     Queue(u16),
@@ -527,6 +528,7 @@ impl Pausable for VirtioCommon {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -612,10 +614,7 @@ mod tests {
                     "offered={offered}, acknowledged={acknowledged}"
                 );
             } else {
-                assert!(matches!(
-                    result,
-                    Err(ActivateError::AccessPlatformNotAcknowledged)
-                ));
+                assert_matches!(result, Err(ActivateError::AccessPlatformNotAcknowledged));
                 assert!(common.workers.is_none());
                 assert!(common.pause_evt.is_none());
             }

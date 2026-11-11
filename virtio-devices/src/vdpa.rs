@@ -648,6 +648,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::atomic::AtomicU8;
 
     use vm_memory::GuestAddress;
@@ -695,10 +696,10 @@ mod tests {
             device_status: Arc::new(AtomicU8::new(0)),
         };
 
-        assert!(matches!(
+        assert_matches!(
             vdpa.activate(context),
             Err(ActivateError::AccessPlatformNotAcknowledged)
-        ));
+        );
     }
 
     // A migration snapshot releases the vDPA device. If the migration fails
@@ -731,9 +732,9 @@ mod tests {
         vdpa.read_config(0, &mut config);
         vdpa.write_config(0, &config);
         vdpa.reset();
-        assert!(matches!(
+        assert_matches!(
             vdpa.activate(context),
             Err(ActivateError::ActivateVdpa(Error::MissingDevice))
-        ));
+        );
     }
 }

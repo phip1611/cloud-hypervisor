@@ -1106,7 +1106,7 @@ impl Migratable for Net {
 /// Whether announcements have to be retried. To avoid ambiguity when using a bool,
 /// this enum clearly describes whether announcements are done, or have to be
 /// retried.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum AnnounceOutcome {
     Retry,
     Done,
@@ -1252,6 +1252,7 @@ impl AnnounceOps for VirtioNetHostAnnounceOps {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::mem::{offset_of, size_of};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1375,11 +1376,11 @@ mod tests {
         net.announce.pending.store(true, Ordering::Release);
 
         announcer.initialize();
-        assert!(matches!(announcer.send_announce(), AnnounceOutcome::Retry));
+        assert_matches!(announcer.send_announce(), AnnounceOutcome::Retry);
 
         net.announce.generation.store(1, Ordering::Release);
 
-        assert!(matches!(announcer.send_announce(), AnnounceOutcome::Done));
+        assert_matches!(announcer.send_announce(), AnnounceOutcome::Done);
         assert!(net.announce.pending.load(Ordering::Acquire));
     }
 
@@ -1399,7 +1400,7 @@ mod tests {
         announcer.initialize();
         net.announce.pending.store(false, Ordering::Release);
 
-        assert!(matches!(announcer.send_announce(), AnnounceOutcome::Done));
+        assert_matches!(announcer.send_announce(), AnnounceOutcome::Done);
         assert!(!net.announce.pending.load(Ordering::Acquire));
         assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
         assert_eq!(interrupt.config_count.load(Ordering::Acquire), 0);
@@ -1414,7 +1415,7 @@ mod tests {
         net.announce.pending.store(true, Ordering::Release);
 
         announcer.initialize();
-        assert!(matches!(announcer.send_announce(), AnnounceOutcome::Done));
+        assert_matches!(announcer.send_announce(), AnnounceOutcome::Done);
 
         assert!(!net.announce.pending.load(Ordering::Acquire));
         assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
@@ -1434,7 +1435,7 @@ mod tests {
         net.announce.pending.store(true, Ordering::Release);
 
         announcer.initialize();
-        assert!(matches!(announcer.send_announce(), AnnounceOutcome::Retry));
+        assert_matches!(announcer.send_announce(), AnnounceOutcome::Retry);
 
         assert!(net.announce.pending.load(Ordering::Acquire));
 
@@ -1459,11 +1460,11 @@ mod tests {
         net.announce.pending.store(true, Ordering::Release);
 
         announcer.initialize();
-        assert!(matches!(announcer.send_announce(), AnnounceOutcome::Retry));
+        assert_matches!(announcer.send_announce(), AnnounceOutcome::Retry);
         assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
 
         invalidate(&mut net);
-        assert!(matches!(announcer.send_announce(), AnnounceOutcome::Done));
+        assert_matches!(announcer.send_announce(), AnnounceOutcome::Done);
 
         assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
     }
@@ -1544,7 +1545,7 @@ mod tests {
         .unwrap();
 
         announcer.initialize();
-        assert!(matches!(announcer.send_announce(), AnnounceOutcome::Retry));
+        assert_matches!(announcer.send_announce(), AnnounceOutcome::Retry);
         assert_eq!(val.load(Ordering::Acquire), 2);
     }
 

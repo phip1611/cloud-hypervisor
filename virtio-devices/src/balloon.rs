@@ -268,6 +268,7 @@ const CONFIG_ACTUAL_SIZE: usize = 4;
 // SAFETY: it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioBalloonConfig {}
 
+#[derive(Debug)]
 enum BalloonStatsState {
     WaitingForInitialDescriptor,
     Idle { descriptor_index: u16 },
@@ -1135,6 +1136,8 @@ impl Migratable for Balloon {}
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use vm_virtio::queue::testing::VirtQueue;
 
     use super::*;
@@ -1383,10 +1386,10 @@ mod tests {
         let mut data = stat(VIRTIO_BALLOON_S_MEMFREE, 1024);
         data.push(0);
 
-        assert!(matches!(
+        assert_matches!(
             parse_balloon_stats(&data),
             Err(BalloonStatsError::InvalidBufferLength(11))
-        ));
+        );
     }
 
     #[test]
@@ -1403,7 +1406,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(balloon.stats(), Err(Error::StatsNotNegotiated)));
+        assert_matches!(balloon.stats(), Err(Error::StatsNotNegotiated));
     }
 
     #[test]
@@ -1526,18 +1529,18 @@ mod tests {
             .unwrap();
         assert_eq!(initial_snapshot.stats.free_memory, Some(100));
         assert!((before..=after).contains(&u128::from(initial_snapshot.last_update)));
-        assert!(matches!(
+        assert_matches!(
             &handler.stats_handler.as_ref().unwrap().state,
             BalloonStatsState::Idle {
                 descriptor_index: 0
             }
-        ));
+        );
 
         handler.process_stats_request().unwrap();
-        assert!(matches!(
+        assert_matches!(
             &handler.stats_handler.as_ref().unwrap().state,
             BalloonStatsState::Pending
-        ));
+        );
 
         let refreshed = stat(VIRTIO_BALLOON_S_MEMFREE, 200);
         memory.write_slice(&refreshed, STATS_ADDRESS).unwrap();
@@ -1556,12 +1559,12 @@ mod tests {
             .unwrap();
         assert_eq!(refreshed_snapshot.stats.free_memory, Some(200));
         assert!(refreshed_snapshot.last_update >= initial_snapshot.last_update);
-        assert!(matches!(
+        assert_matches!(
             &handler.stats_handler.as_ref().unwrap().state,
             BalloonStatsState::Idle {
                 descriptor_index: 0
             }
-        ));
+        );
     }
 
     #[test]
@@ -1585,12 +1588,12 @@ mod tests {
         handler.process_stats_queue().unwrap();
 
         assert_eq!(handler.queues[0].next_avail(), 0);
-        assert!(matches!(
+        assert_matches!(
             &handler.stats_handler.as_ref().unwrap().state,
             BalloonStatsState::Idle {
                 descriptor_index: 1
             }
-        ));
+        );
     }
 
     #[test]
@@ -1607,10 +1610,10 @@ mod tests {
 
         handler.process_stats_request().unwrap();
 
-        assert!(matches!(
+        assert_matches!(
             &handler.stats_handler.as_ref().unwrap().state,
             BalloonStatsState::Pending
-        ));
+        );
     }
 
     #[test]
@@ -1627,10 +1630,10 @@ mod tests {
         );
 
         handler.process_stats_request().unwrap();
-        assert!(matches!(
+        assert_matches!(
             &handler.stats_handler.as_ref().unwrap().state,
             BalloonStatsState::WaitingForInitialDescriptor
-        ));
+        );
 
         let initial = stat(VIRTIO_BALLOON_S_MEMFREE, 100);
         memory.write_slice(&initial, STATS_ADDRESS).unwrap();
@@ -1638,12 +1641,12 @@ mod tests {
         guest_queue.avail.ring[0].set(0);
         guest_queue.avail.idx.set(1);
         handler.process_stats_queue().unwrap();
-        assert!(matches!(
+        assert_matches!(
             &handler.stats_handler.as_ref().unwrap().state,
             BalloonStatsState::Idle {
                 descriptor_index: 0
             }
-        ));
+        );
         assert_eq!(
             handler
                 .stats_handler
@@ -1673,10 +1676,7 @@ mod tests {
                 descriptor_index: 16,
             },
         );
-        assert!(matches!(
-            handler.process_stats_request(),
-            Err(Error::QueueAddUsed(_))
-        ));
+        assert_matches!(handler.process_stats_request(), Err(Error::QueueAddUsed(_)));
     }
 
     #[test]
