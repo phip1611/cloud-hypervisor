@@ -46,6 +46,9 @@ jobs:
           args: ${{ matrix.platform.args  }}
           strip: true
           toolchain: "1.89.0"
+          # Tag and merge queue refs are unique, so no later run could
+          # restore this cache.
+          use-rust-cache: false
       - name: Copy Release Binaries
         if: github.event_name == 'create' && github.event.ref_type == 'tag'
         shell: bash
