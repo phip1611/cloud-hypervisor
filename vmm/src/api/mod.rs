@@ -2226,7 +2226,7 @@ impl ApiAction for VmNmi {
 mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use std::{env, fs, process};
+    use std::{assert_matches, env, fs, process};
 
     use super::*;
     use crate::tests::test_fd;
@@ -2393,50 +2393,43 @@ mod tests {
         // SAFETY: This test input contains no inherited descriptors.
         let e = unsafe { VmReceiveMigrationData::parse("receiver_url=file:///tmp/migration") }
             .unwrap_err();
-        assert!(
-            matches!(e, VmReceiveMigrationConfigError::InvalidSocketPrefix),
-            "Expected \"{:?}\"; got \"{e:?}\"",
+        assert_matches!(
+            e,
             VmReceiveMigrationConfigError::InvalidSocketPrefix,
+            "Expected \"{:?}\"; got \"{e:?}\"",
+            VmReceiveMigrationConfigError::InvalidSocketPrefix
         );
         let e =
             // SAFETY: This test input contains no inherited descriptors.
             unsafe { VmReceiveMigrationData::parse("receiver_url=tcp:192.168.1.1") }.unwrap_err();
-        assert!(
-            matches!(
-                e,
-                VmReceiveMigrationConfigError::MalformedReceiverUrl(
-                    TcpAddressParseError::MissingPort
-                )
-            ),
-            "Expected \"{:?}\"; got \"{e:?}\"",
+        assert_matches!(
+            e,
             VmReceiveMigrationConfigError::MalformedReceiverUrl(TcpAddressParseError::MissingPort),
+            "Expected \"{:?}\"; got \"{e:?}\"",
+            VmReceiveMigrationConfigError::MalformedReceiverUrl(TcpAddressParseError::MissingPort)
         );
         let e =
             // SAFETY: This test input contains no inherited descriptors.
             unsafe { VmReceiveMigrationData::parse("receiver_url=tcp:[2001:db8::1]") }.unwrap_err();
-        assert!(
-            matches!(
-                e,
-                VmReceiveMigrationConfigError::MalformedReceiverUrl(
-                    TcpAddressParseError::MissingPortSeparatorAfterBracketedHost
-                )
+        assert_matches!(
+            e,
+            VmReceiveMigrationConfigError::MalformedReceiverUrl(
+                TcpAddressParseError::MissingPortSeparatorAfterBracketedHost
             ),
             "Expected \"{:?}\"; got \"{e:?}\"",
             VmReceiveMigrationConfigError::MalformedReceiverUrl(
                 TcpAddressParseError::MissingPortSeparatorAfterBracketedHost
-            ),
+            )
         );
         let e =
             // SAFETY: This test input contains no inherited descriptors.
             unsafe { VmReceiveMigrationData::parse("receiver_url=unix:/tmp/sock,tls_dir=/tmp") }
                 .unwrap_err();
-        assert!(
-            matches!(
-                e,
-                VmReceiveMigrationConfigError::TlsEncryptionUsedForUnixSocket
-            ),
-            "Expected \"{:?}\"; got \"{e:?}\"",
+        assert_matches!(
+            e,
             VmReceiveMigrationConfigError::TlsEncryptionUsedForUnixSocket,
+            "Expected \"{:?}\"; got \"{e:?}\"",
+            VmReceiveMigrationConfigError::TlsEncryptionUsedForUnixSocket
         );
 
         // SAFETY: This test input contains no inherited descriptors.
@@ -2448,9 +2441,10 @@ mod tests {
         // Missing receiver_url in keyed form must fail.
         // SAFETY: This test input contains no inherited descriptors.
         let e = unsafe { VmReceiveMigrationData::parse("tls_dir=/tmp/certs") }.unwrap_err();
-        assert!(
-            matches!(e, VmReceiveMigrationConfigError::ParseError(_)),
-            "Expected \"ParseError\"; got \"{e:?}\"",
+        assert_matches!(
+            e,
+            VmReceiveMigrationConfigError::ParseError(_),
+            "Expected \"ParseError\"; got \"{e:?}\""
         );
 
         use std::os::fd::{AsRawFd, IntoRawFd};
@@ -2494,18 +2488,20 @@ mod tests {
             // SAFETY: This test input contains no inherited descriptors.
             unsafe { VmReceiveMigrationData::parse("receiver_url=unix:/tmp/sock,zone_updates=[]") }
                 .unwrap_err();
-        assert!(
-            matches!(e, VmReceiveMigrationConfigError::ParseError(_)),
-            "Expected \"ParseError\"; got \"{e:?}\"",
+        assert_matches!(
+            e,
+            VmReceiveMigrationConfigError::ParseError(_),
+            "Expected \"ParseError\"; got \"{e:?}\""
         );
         // SAFETY: This test input contains no inherited descriptors.
         let e = unsafe {
             VmReceiveMigrationData::parse("receiver_url=unix:/tmp/sock,zone_updates=[zone1 3]")
         }
         .unwrap_err();
-        assert!(
-            matches!(e, VmReceiveMigrationConfigError::ParseError(_)),
-            "Expected \"ParseError\"; got \"{e:?}\"",
+        assert_matches!(
+            e,
+            VmReceiveMigrationConfigError::ParseError(_),
+            "Expected \"ParseError\"; got \"{e:?}\""
         );
         // SAFETY: This test input contains no inherited descriptors.
         let e = unsafe {
@@ -2514,10 +2510,11 @@ mod tests {
             )
         }
         .unwrap_err();
-        assert!(
-            matches!(e, VmReceiveMigrationConfigError::MultipleMemoryZoneUpdates),
-            "Expected \"{:?}\"; got \"{e:?}\"",
+        assert_matches!(
+            e,
             VmReceiveMigrationConfigError::MultipleMemoryZoneUpdates,
+            "Expected \"{:?}\"; got \"{e:?}\"",
+            VmReceiveMigrationConfigError::MultipleMemoryZoneUpdates
         );
         //Mind the space before the second zone. If the whitespace isn't trimmed, we end up with two
         //different ID and the error does not trigger
@@ -2528,10 +2525,11 @@ mod tests {
             )
         }
         .unwrap_err();
-        assert!(
-            matches!(e, VmReceiveMigrationConfigError::MultipleMemoryZoneUpdates),
-            "Expected \"{:?}\"; got \"{e:?}\"",
+        assert_matches!(
+            e,
             VmReceiveMigrationConfigError::MultipleMemoryZoneUpdates,
+            "Expected \"{:?}\"; got \"{e:?}\"",
+            VmReceiveMigrationConfigError::MultipleMemoryZoneUpdates
         );
     }
 
@@ -2605,16 +2603,16 @@ mod tests {
 
         // Invalid destination URL scheme is rejected
         VmSendMigrationData::parse("destination_url=file:///tmp/migration").unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             VmSendMigrationData::parse("destination_url=tcp:192.168.1.1").unwrap_err(),
             VmSendMigrationConfigError::InvalidDestinationUrl(TcpAddressParseError::MissingPort)
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             VmSendMigrationData::parse("destination_url=tcp:[2001:db8::1]").unwrap_err(),
             VmSendMigrationConfigError::InvalidDestinationUrl(
                 TcpAddressParseError::MissingPortSeparatorAfterBracketedHost
             )
-        ));
+        );
 
         // Local migration requires a UNIX socket destination
         VmSendMigrationData::parse("destination_url=tcp:192.168.1.1:8080,local=yes").unwrap_err();
