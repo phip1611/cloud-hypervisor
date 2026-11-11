@@ -455,6 +455,8 @@ pub(crate) fn setup_smbios(mem: &GuestMemory, smbios: Option<&SmbiosConfig>) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     /// Collects all strings after a SMBIOS structure, stopping at the double-NUL terminator and returns next addr.
@@ -649,7 +651,7 @@ mod tests {
             alloc_index(&mut next, true).unwrap();
         }
         let err = alloc_index(&mut next, true).unwrap_err();
-        assert!(matches!(err, Error::TooManyStrings));
+        assert_matches!(err, Error::TooManyStrings);
     }
 
     #[test]
@@ -664,7 +666,7 @@ mod tests {
         };
 
         let err = setup_smbios(&mem, Some(&smbios)).unwrap_err();
-        assert!(matches!(err, Error::ParseUuid(_, _)));
+        assert_matches!(err, Error::ParseUuid(_, _));
     }
 
     #[test]
@@ -709,7 +711,7 @@ mod tests {
         };
 
         let err = setup_smbios(&mem, Some(&smbios)).unwrap_err();
-        assert!(matches!(err, Error::NotEnoughMemory));
+        assert_matches!(err, Error::NotEnoughMemory);
     }
 
     #[test]
@@ -718,7 +720,7 @@ mod tests {
             GuestMemory::from_ranges(&[(SMBIOS_START, size_of::<Smbios30Entrypoint>())]).unwrap();
 
         let err = setup_smbios(&mem, None).unwrap_err();
-        assert!(matches!(err, Error::WriteData(_)));
+        assert_matches!(err, Error::WriteData(_));
     }
 
     #[test]
