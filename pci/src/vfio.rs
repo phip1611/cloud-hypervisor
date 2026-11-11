@@ -201,13 +201,13 @@ impl VfioMsix {
 
         // Update "Message Control" word
         if offset == 2
-            && let Ok(data) = <[u8; 2]>::try_from(data)
+            && let Some(&data) = data.as_array::<2>()
         {
             let data = u16::from_le_bytes(data);
             self.bar.set_msg_ctl(data);
             self.cap.set_msg_ctl(data);
         } else if offset == 0
-            && let Ok(data) = <[u8; 4]>::try_from(data)
+            && let Some(&data) = data.as_array::<4>()
         {
             // Some guests update MSI-X control through the dword config write path.
             let data = (u32::from_le_bytes(data) >> 16) as u16;
@@ -1829,7 +1829,7 @@ impl VfioCommon {
                 .write_word(byte_offset, u16::from(data[0]) | (u16::from(data[1]) << 8)),
             4 => self.configuration.write_reg(
                 reg_idx,
-                u32::from_le_bytes(data.try_into().expect("data should be 4 bytes")),
+                u32::from_le_bytes(*data.as_array().expect("data should be 4 bytes")),
             ),
             _ => {}
         }
@@ -3662,7 +3662,7 @@ mod tests {
         fn dword(&self, offset: u32) -> u32 {
             let space = self.space.lock().unwrap();
             let start = offset as usize;
-            u32::from_le_bytes(space[start..start + 4].try_into().unwrap())
+            u32::from_le_bytes(*space[start..start + 4].as_array().unwrap())
         }
     }
 

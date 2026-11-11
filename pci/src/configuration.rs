@@ -1066,7 +1066,7 @@ impl PciConfiguration {
         {
             if msix_cap_reg_idx == reg_idx
                 && offset == 2
-                && let Ok(data) = <[u8; 2]>::try_from(data)
+                && let Some(&data) = data.as_array::<2>()
             {
                 msix_config
                     .lock()
@@ -1074,7 +1074,7 @@ impl PciConfiguration {
                     .set_msg_ctl(u16::from_le_bytes(data));
             } else if msix_cap_reg_idx == reg_idx
                 && offset == 0
-                && let Ok(data) = <[u8; 4]>::try_from(data)
+                && let Some(&data) = data.as_array::<4>()
             {
                 msix_config
                     .lock()
@@ -1091,7 +1091,7 @@ impl PciConfiguration {
             ),
             4 => self.write_reg(
                 reg_idx,
-                u32::from_le_bytes(data.try_into().expect("data should be 4 bytes")),
+                u32::from_le_bytes(*data.as_array().expect("data should be 4 bytes")),
             ),
             _ => (),
         }
@@ -1129,9 +1129,7 @@ impl PciConfiguration {
         reg_idx: usize,
         data: &[u8],
     ) -> Option<BarReprogrammingParams> {
-        let Ok(data) = <[u8; 4]>::try_from(data) else {
-            return None;
-        };
+        let data = *data.as_array::<4>()?;
 
         let value = u32::from_le_bytes(data);
 
