@@ -248,7 +248,7 @@ mod tests {
 
     fn tail_trim_range_from_len(base_addr: usize, len: size_t) -> (usize, size_t) {
         let alignment = find_alignment(len);
-        let reserve = len.checked_add(alignment).unwrap();
+        let reserve = len.strict_add(alignment);
         let aligned_addr = base_addr.next_multiple_of(alignment);
 
         tail_trim_range(base_addr, reserve, aligned_addr, len)
