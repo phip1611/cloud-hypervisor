@@ -204,6 +204,10 @@ impl ThrottleWorker {
         match receiver.recv_timeout(sleep_duration) {
             Ok(next_task) => Some(next_task),
             Err(RecvTimeoutError::Timeout) => None,
+            #[expect(
+                clippy::panic,
+                reason = "the handle sends Exit before it drops the sender"
+            )]
             Err(RecvTimeoutError::Disconnected) => {
                 panic!("thread and channel should exit gracefully")
             }

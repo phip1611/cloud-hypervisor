@@ -210,6 +210,7 @@ pub const KVM_CPUID_DEFINITIONS: CpuidDefinitions<6> = const {
 
 /// Compile time check that the given `BIT` in the CPUID output register specified by `params` is not
 /// declared to be overwritten by `0` for non-host CPU profiles.
+#[expect(clippy::panic, reason = "only evaluated at compile time")]
 pub const fn assert_not_denied_cpuid_feature<const BIT: u8>(params: &Parameters) {
     if let Some(defs) = KVM_CPUID_DEFINITIONS.get(params)
         && let Some(def) = defs.find_bit::<BIT>()

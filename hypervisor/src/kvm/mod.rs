@@ -1502,7 +1502,7 @@ impl vm::Vm for KvmVm {
                 num_pages: chunk.num_pages,
                 first_page: chunk.first_page,
                 __bindgen_anon_1: kvm_bindings::kvm_clear_dirty_log__bindgen_ty_1 {
-                    dirty_bitmap: chunk.bitmap.as_ptr() as *mut libc::c_void,
+                    dirty_bitmap: chunk.bitmap.as_ptr().cast::<libc::c_void>().cast_mut(),
                 },
             };
             // SAFETY: The bitmap slice remains valid throughout the ioctl and

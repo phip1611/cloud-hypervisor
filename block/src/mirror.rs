@@ -256,6 +256,10 @@ impl MirrorState {
     /// Plus idempotent self-transitions. `Completed` and `Cancelling` are
     /// terminal: the mirror handle is dropped out of them, after which
     /// `Block::mirror_status` reports no active mirror.
+    #[expect(
+        clippy::panic,
+        reason = "invalid mirror phase transitions are programming errors"
+    )]
     pub fn transition_to_phase(&self, target: MirrorPhase) {
         if let Err((from, to)) = self.try_transition_to_phase(target) {
             // An invalid transition indicates a programming error. Reverting the

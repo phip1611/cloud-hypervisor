@@ -289,8 +289,9 @@ impl MigrationProgress {
                         .unwrap_or(*old_vcpu_throttle_percent),
                 };
             }
+            // panic is fine as we have a logic error here, nothing that was caused by a user.
+            #[expect(clippy::panic, reason = "illegal state transitions are logic errors")]
             illegal => {
-                // panic is fine as we have a logic error here, nothing that was caused by a user.
                 panic!(
                     "illegal state transition: {} -> ongoing",
                     illegal.state_name(),
@@ -307,6 +308,7 @@ impl MigrationProgress {
     /// # Panics
     ///
     /// If the current state is not [`MigrationState::Ongoing`], this function panics.
+    #[expect(clippy::panic, reason = "illegal state transitions are logic errors")]
     pub fn mark_as_cancelled(&mut self) {
         if !matches!(self.state, MigrationState::Ongoing { .. }) {
             panic!(
@@ -327,6 +329,7 @@ impl MigrationProgress {
     /// # Panics
     ///
     /// If the current state is not [`MigrationState::Ongoing`], this function panics.
+    #[expect(clippy::panic, reason = "illegal state transitions are logic errors")]
     pub fn mark_as_failed(&mut self, error: &dyn Error) {
         if !matches!(self.state, MigrationState::Ongoing { .. }) {
             panic!(
@@ -350,6 +353,7 @@ impl MigrationProgress {
     /// # Panics
     ///
     /// If the current state is not [`MigrationState::Ongoing`], this function panics.
+    #[expect(clippy::panic, reason = "illegal state transitions are logic errors")]
     pub fn mark_as_finished(&mut self) {
         if !matches!(self.state, MigrationState::Ongoing { .. }) {
             panic!(

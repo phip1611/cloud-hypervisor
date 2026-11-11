@@ -1883,10 +1883,6 @@ impl Vmm {
     ///
     /// Runs after-migration cleanup only on success. Callers must handle failed
     /// migrations.
-    #[cfg_attr(
-        all(feature = "kvm", target_arch = "x86_64"),
-        expect(clippy::too_many_arguments)
-    )]
     fn send_migration(
         vm: &mut Vm,
         send_data_migration: &VmSendMigrationData,
@@ -3828,14 +3824,14 @@ impl RequestHandler for Vmm {
         // If the migration fails, the state will later be updated accordingly.
         {
             let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
-            if lock
-                .as_ref()
-                .map(|p| &p.state)
-                .is_some_and(|snapshot| matches!(snapshot, MigrationState::Ongoing { .. }))
-            {
-                // If this panic triggers, we made a programming error in our state handling.
-                panic!("migration already ongoing");
-            }
+            // If this assertion triggers, we made a programming error in our state handling.
+            assert!(
+                !lock
+                    .as_ref()
+                    .map(|p| &p.state)
+                    .is_some_and(|snapshot| matches!(snapshot, MigrationState::Ongoing { .. })),
+                "migration already ongoing"
+            );
             let transportation_mode =
                 if send_data_migration.effective_memory_mode() == MigrationMode::MemFDs {
                     TransportationMode::Local
