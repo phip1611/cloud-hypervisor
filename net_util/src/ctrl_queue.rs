@@ -260,6 +260,7 @@ impl CtrlQueue {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::mem::size_of;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -448,10 +449,10 @@ mod tests {
             Arc::new(AtomicU16::new(1)),
         );
 
-        assert!(matches!(
+        assert_matches!(
             ctrl_q.process(&mem, &mut queue, None),
             Err(Error::NoDataDescriptor)
-        ));
+        );
     }
 
     /// Build a VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET chain whose data and status
@@ -524,7 +525,7 @@ mod tests {
         for (status_len, status_flags) in [(1, 0), (0, write)] {
             let (result, status) =
                 run_mq_chain(size_of::<u16>() as u32, 0, status_len, status_flags);
-            assert!(matches!(result, Err(Error::InvalidDescriptor)));
+            assert_matches!(result, Err(Error::InvalidDescriptor));
             assert_eq!(status, 0xff);
         }
     }
@@ -536,7 +537,7 @@ mod tests {
         let write = u16::try_from(VRING_DESC_F_WRITE).unwrap();
         for (data_len, data_flags) in [(1, 0), (size_of::<u16>() as u32, write)] {
             let (result, status) = run_mq_chain(data_len, data_flags, 1, write);
-            assert!(matches!(result, Err(Error::InvalidDescriptor)));
+            assert_matches!(result, Err(Error::InvalidDescriptor));
             assert_eq!(status, 0xff);
         }
     }
