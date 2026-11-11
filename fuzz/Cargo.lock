@@ -1216,7 +1216,6 @@ dependencies = [
  "arch",
  "bitflags 2.13.2",
  "block",
- "cfg-if",
  "devices",
  "epoll",
  "event_monitor",
