@@ -78,6 +78,7 @@ use crate::vm_config::{
     PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
 };
 
+// Benchmark change: forces a rebuild of the vmm crate and its dependents.
 mod acpi;
 pub mod api;
 mod clone3;
