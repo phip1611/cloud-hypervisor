@@ -439,4 +439,26 @@ mod tests {
         let n = read_retry(&mut console, &mut buf);
         assert_eq!(&buf[..n], b"in");
     }
+
+    #[test]
+    fn tcp_client_with_additional_log_file() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut console = SocketConsole::new();
+        let mut remote = TcpStream::connect(addr).unwrap();
+        console.accept_tcp(&listener).unwrap();
+
+        let mut sink = console.out_sink();
+        sink.write_all(b"hi\n").unwrap();
+        let mut got = [0u8; 3];
+        remote.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"hi\n");
+
+        remote.write_all(b"in").unwrap();
+        remote.flush().unwrap();
+        let mut buf = [0u8; 8];
+        let n = read_retry(&mut console, &mut buf);
+        assert_eq!(&buf[..n], b"in");
+    }
 }
