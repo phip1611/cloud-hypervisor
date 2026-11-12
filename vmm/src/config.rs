@@ -2521,20 +2521,6 @@ impl ConsoleOutput {
             ConsoleOutput::Tty
         } else if parser.is_set("null") {
             ConsoleOutput::Null
-        } else if parser.is_set("file") {
-            let file = parser
-                .get("file")
-                .ok_or(Error::Validation(ValidationError::ConsoleFileMissing))?;
-            ConsoleOutput::File {
-                file: PathBuf::from(file),
-            }
-        } else if parser.is_set("socket") {
-            let socket = parser
-                .get("socket")
-                .ok_or(Error::Validation(ValidationError::ConsoleSocketPathMissing))?;
-            ConsoleOutput::Socket {
-                socket: PathBuf::from(socket),
-            }
         } else if parser.is_set("tcp") {
             let address = parser
                 .get("tcp")
@@ -2555,6 +2541,21 @@ impl ConsoleOutput {
                         .map_err(|source| Error::ResolveConsoleTcpAddress { address, source })?,
                     server,
                 },
+                file: parser.get("file").map(PathBuf::from),
+            }
+        } else if parser.is_set("file") {
+            let file = parser
+                .get("file")
+                .ok_or(Error::Validation(ValidationError::ConsoleFileMissing))?;
+            ConsoleOutput::File {
+                file: PathBuf::from(file),
+            }
+        } else if parser.is_set("socket") {
+            let socket = parser
+                .get("socket")
+                .ok_or(Error::Validation(ValidationError::ConsoleSocketPathMissing))?;
+            ConsoleOutput::Socket {
+                socket: PathBuf::from(socket),
             }
         } else {
             return Err(Error::ParseConsoleInvalidModeGiven);
@@ -2570,7 +2571,7 @@ impl ConsoleOutput {
     }
 
     pub fn validate(&self) -> ValidationResult<()> {
-        if let ConsoleOutput::Tcp { tcp } = self {
+        if let ConsoleOutput::Tcp { tcp, .. } = self {
             if !tcp.server {
                 return Err(ValidationError::ConsoleTcpClientUnsupported);
             }
@@ -6146,6 +6147,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     address: "127.0.0.1:4444".parse().unwrap(),
                     server: true,
                 },
+                file: None,
             }
         );
         assert_eq!(
@@ -6155,6 +6157,17 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     address: "[::1]:4444".parse().unwrap(),
                     server: true,
                 },
+                file: None,
+            }
+        );
+        assert_eq!(
+            SerialConfig::parse("tcp=127.0.0.1:4444,file=/tmp/serial.log")?.output,
+            ConsoleOutput::Tcp {
+                tcp: TcpConsoleConfig {
+                    address: "127.0.0.1:4444".parse().unwrap(),
+                    server: true,
+                },
+                file: Some(PathBuf::from("/tmp/serial.log")),
             }
         );
         SerialConfig::parse("tcp=localhost:4444").unwrap_err();
@@ -6165,7 +6178,8 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             assert!(matches!(
                 serial.output,
                 ConsoleOutput::Tcp {
-                    tcp: TcpConsoleConfig { server: true, .. }
+                    tcp: TcpConsoleConfig { server: true, .. },
+                    ..
                 }
             ));
             serial.validate().unwrap();
@@ -6235,6 +6249,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                 address: "127.0.0.1:4444".parse().unwrap(),
                 server: true,
             },
+            file: None,
         };
         assert_eq!(serial.output, expected);
         assert_eq!(console.output, expected);
@@ -6306,7 +6321,21 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     "mode": "Tcp",
                     "tcp": { "address": "127.0.0.1:4444", "server": true }
                 }),
-                ConsoleOutput::Tcp { tcp },
+                ConsoleOutput::Tcp {
+                    tcp: tcp.clone(),
+                    file: None,
+                },
+            ),
+            (
+                serde_json::json!({
+                    "mode": "Tcp",
+                    "tcp": { "address": "127.0.0.1:4444", "server": true },
+                    "file": "/tmp/console.log"
+                }),
+                ConsoleOutput::Tcp {
+                    tcp,
+                    file: Some(PathBuf::from("/tmp/console.log")),
+                },
             ),
             (serde_json::json!({ "mode": "Null" }), ConsoleOutput::Null),
         ];
