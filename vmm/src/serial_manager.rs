@@ -19,7 +19,7 @@ use devices::legacy::Serial;
 use libc::EFD_NONBLOCK;
 use log::{error, info, warn};
 use seccompiler::{SeccompAction, apply_filter};
-use serial_buffer::{SerialBuffer, SocketConsole};
+use serial_buffer::{SerialBuffer, SocketConsole, Tee};
 use thiserror::Error;
 use vmm_sys_util::errno;
 use vmm_sys_util::eventfd::EventFd;
@@ -171,7 +171,7 @@ impl SerialManager {
             ConsoleTransport::Socket(ref listener) => {
                 Some((listener.as_raw_fd(), EpollDispatch::Socket))
             }
-            ConsoleTransport::TcpListen { ref listener } => {
+            ConsoleTransport::TcpListen { ref listener, .. } => {
                 Some((listener.as_raw_fd(), EpollDispatch::Socket))
             }
             _ => return Ok(None),
@@ -208,11 +208,15 @@ impl SerialManager {
             ConsoleTransport::Socket(_) | ConsoleTransport::TcpListen { .. }
         ) {
             let console = SocketConsole::new();
-            serial
-                .as_ref()
-                .lock()
-                .unwrap()
-                .set_out(Some(console.out_sink()));
+            let mut out = console.out_sink();
+            if let ConsoleTransport::TcpListen {
+                file: Some(ref file),
+                ..
+            } = transport
+            {
+                out = Box::new(Tee::new(out, Arc::clone(file)));
+            }
+            serial.as_ref().lock().unwrap().set_out(Some(out));
             socket_console = Some(console);
         }
 
@@ -332,7 +336,7 @@ impl SerialManager {
                                 }
                                 EpollDispatch::Socket => {
                                     if let Some(console) = socket_console.as_mut() {
-                                        if let ConsoleTransport::TcpListen { ref listener } = transport {
+                                        if let ConsoleTransport::TcpListen { ref listener, .. } = transport {
                                             if console.accept_tcp(listener).map_err(Error::AcceptConnection)?
                                                 && let Some(fd) = console.client_fd()
                                             {
@@ -416,7 +420,7 @@ impl SerialManager {
                                                     };
                                                     if was_connected
                                                             && console.client_fd().is_none()
-                                                            && let ConsoleTransport::TcpListen { ref listener } = transport
+                                                            && let ConsoleTransport::TcpListen { ref listener, .. } = transport
                                                         {
                                                             epoll::ctl(
                                                                 epoll_fd.as_raw_fd(),
