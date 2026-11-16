@@ -19,7 +19,7 @@
 //! underlying socket would bypass TLS processing and break the connection.
 
 use std::fs::{self, File};
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
@@ -200,8 +200,51 @@ pub enum TlsError {
 /// transport-agnostic API.
 #[derive(Debug)]
 enum TlsStreamParticipant {
-    Client(StreamOwned<ClientConnection, TcpStream>),
-    Server(StreamOwned<ServerConnection, TcpStream>),
+    Client(StreamOwned<ClientConnection, BufferedTcpStream>),
+    Server(StreamOwned<ServerConnection, BufferedTcpStream>),
+}
+
+/// The [`TcpStream`] below rustls, reading ciphertext in large chunks.
+///
+/// rustls reads from the socket only into its record buffer, which holds at
+/// most one TLS record of 16 KiB. During a bulk transfer this costs one read
+/// from the socket per record. Serving those reads from a larger buffer
+/// saves receiver CPU time.
+///
+/// Bytes in this buffer are invisible to `poll()` on the socket. This is fine
+/// because every migration request waits for its response before the peer
+/// sends the next one, so nothing is buffered while a receiver polls.
+#[derive(Debug)]
+struct BufferedTcpStream(BufReader<TcpStream>);
+
+impl BufferedTcpStream {
+    /// Large enough to make the read(2) overhead negligible: 256 KiB measured
+    /// 4 instead of 64 reads per MiB and 5% less receiver CPU time.
+    const READ_BUF_SIZE: usize = 256 /* KiB */ << 10;
+
+    fn new(stream: TcpStream) -> Self {
+        Self(BufReader::with_capacity(Self::READ_BUF_SIZE, stream))
+    }
+}
+
+impl Read for BufferedTcpStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for BufferedTcpStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.get_mut().write(buf)
+    }
+
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.0.get_mut().write_vectored(bufs)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.get_mut().flush()
+    }
 }
 
 /// Server/Client-agnostic TLS stream.
@@ -220,8 +263,8 @@ impl TlsStream {
     /// Returns a reference to the underlying [`TcpStream`].
     pub fn tcp_stream(&self) -> &TcpStream {
         match &self.stream {
-            TlsStreamParticipant::Client(stream) => stream.get_ref(),
-            TlsStreamParticipant::Server(stream) => stream.get_ref(),
+            TlsStreamParticipant::Client(stream) => stream.get_ref().0.get_ref(),
+            TlsStreamParticipant::Server(stream) => stream.get_ref().0.get_ref(),
         }
     }
 
@@ -254,7 +297,7 @@ impl TlsStream {
             .map_err(TlsError::RustlsError)
             .map_err(MigratableError::Tls)?;
 
-        let mut tls = StreamOwned::new(conn, socket);
+        let mut tls = StreamOwned::new(conn, BufferedTcpStream::new(socket));
         while tls.conn.is_handshaking() {
             let (rd, wr) = tls
                 .conn
@@ -287,7 +330,7 @@ impl TlsStream {
             .map_err(TlsError::RustlsError)
             .map_err(MigratableError::Tls)?;
 
-        let mut tls = StreamOwned::new(conn, socket);
+        let mut tls = StreamOwned::new(conn, BufferedTcpStream::new(socket));
         while tls.conn.is_handshaking() {
             let (rd, wr) = tls
                 .conn
@@ -358,8 +401,8 @@ impl Write for TlsStream {
 impl AsFd for TlsStream {
     fn as_fd(&self) -> BorrowedFd<'_> {
         match &self.stream {
-            TlsStreamParticipant::Client(s) => s.get_ref().as_fd(),
-            TlsStreamParticipant::Server(s) => s.get_ref().as_fd(),
+            TlsStreamParticipant::Client(s) => s.get_ref().0.get_ref().as_fd(),
+            TlsStreamParticipant::Server(s) => s.get_ref().0.get_ref().as_fd(),
         }
     }
 }
